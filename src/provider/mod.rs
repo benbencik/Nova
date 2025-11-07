@@ -17,6 +17,9 @@ pub(crate) mod pedersen;
 pub(crate) mod ptau;
 pub(crate) mod traits;
 
+#[cfg(feature = "mercury-timing")]
+pub mod mercury_timing;
+
 mod msm;
 
 use crate::{

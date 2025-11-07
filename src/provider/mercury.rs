@@ -38,6 +38,9 @@ use crate::{
   },
 };
 
+#[cfg(feature = "mercury-timing")]
+use crate::provider::mercury_timing::TimingGuard;
+
 // Transcript absorb/squeeze labels used by both prover and verifier
 mod transcript_labels {
   pub const LABEL_F: &[u8] = b"f";
@@ -246,6 +249,9 @@ fn divide_by_binomial<Scalar: PrimeField>(
   num_cols: usize,
   alpha: &Scalar,
 ) -> (UniPoly<Scalar>, UniPoly<Scalar>) {
+  #[cfg(feature = "mercury-timing")]
+  let _guard = TimingGuard::new("divide_by_binomial");
+
   let (quotients, remainder): (Vec<Vec<Scalar>>, Vec<Scalar>) = (0..num_cols)
     .into_par_iter()
     .map(|col_id| {
@@ -296,6 +302,9 @@ fn compute_h_poly<Scalar: PrimeField>(
   num_rows: usize,
   num_cols: usize,
 ) -> UniPoly<Scalar> {
+  #[cfg(feature = "mercury-timing")]
+  let _guard = TimingGuard::new("compute_h_poly");
+
   let coeffs = (0..num_rows)
     .into_par_iter()
     .map(|row_id| {
@@ -318,6 +327,9 @@ fn make_s_polynomial<Scalar: PrimeField>(
   log_b: u32,
   gamma: &Scalar,
 ) -> UniPoly<Scalar> {
+  #[cfg(feature = "mercury-timing")]
+  let _guard = TimingGuard::new("make_s_polynomial");
+
   let b = 1 << log_b;
   let b2 = b * 2;
 
@@ -340,6 +352,9 @@ fn make_s_polynomial<Scalar: PrimeField>(
 
   // Coefficients To Evaluations
   let [a_evals_1, a_evals_2, b_evals_1, b_evals_2] = {
+    #[cfg(feature = "mercury-timing")]
+    let _fft_guard = TimingGuard::new("make_s_polynomial::fft_forward");
+
     evals
       .par_iter_mut()
       .for_each(|a| a.resize(b2, Scalar::ZERO));
@@ -380,6 +395,9 @@ fn make_s_polynomial<Scalar: PrimeField>(
 
   // Evaluations To Coefficients
   let mut res = {
+    #[cfg(feature = "mercury-timing")]
+    let _ifft_guard = TimingGuard::new("make_s_polynomial::fft_inverse");
+
     best_fft(&mut evals, omega.invert().unwrap(), log_b + 1);
 
     let mut res = UniPoly { coeffs: evals };
@@ -404,6 +422,9 @@ mod batch_evaluation {
   use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator,
   };
+
+  #[cfg(feature = "mercury-timing")]
+  use crate::provider::mercury_timing::TimingGuard;
 
   use crate::provider::mercury::Commitment;
   use crate::provider::traits::DlogGroup;
@@ -569,7 +590,12 @@ mod batch_evaluation {
     assert_eq!(rem, E::Scalar::ZERO);
 
     // W(X) = quot_m(X)
-    let comm_w = E::CE::commit(ck, &quot_m_poly.coeffs, &E::Scalar::ZERO);
+    let comm_w = {
+      #[cfg(feature = "mercury-timing")]
+      let _msm_guard = TimingGuard::new("batch_eval::msm_commit_w");
+
+      E::CE::commit(ck, &quot_m_poly.coeffs, &E::Scalar::ZERO)
+    };
     transcript.absorb(LABEL_W, &[comm_w].to_vec().as_slice());
 
     // * BDFG20 4.1 - 3.
@@ -656,7 +682,12 @@ mod batch_evaluation {
     };
 
     // W'(X) = quot_l(X)
-    let comm_w_prime = E::CE::commit(ck, &quot_l_poly.coeffs, &E::Scalar::ZERO);
+    let comm_w_prime = {
+      #[cfg(feature = "mercury-timing")]
+      let _msm_guard = TimingGuard::new("batch_eval::msm_commit_w_prime");
+
+      E::CE::commit(ck, &quot_l_poly.coeffs, &E::Scalar::ZERO)
+    };
 
     Ok(BatchArg {
       comm_w,
@@ -759,7 +790,12 @@ mod batch_evaluation {
     // Pairing 2 rhs is [tau]_2
 
     // * Main Cost (Verifier) II: MSM of 7
-    let lhs1 = Commitment::new(E::GE::vartime_multiscalar_mul(&scalars, &bases));
+    let lhs1 = {
+      #[cfg(feature = "mercury-timing")]
+      let _msm_guard = TimingGuard::new("verify::msm_batch_eval");
+
+      Commitment::new(E::GE::vartime_multiscalar_mul(&scalars, &bases))
+    };
     let lhs2 = cm.comm_w_prime;
 
     Ok((lhs1, lhs2))
@@ -931,10 +967,15 @@ where
 
     // * 5. Mercury Section 6. Step 2. (c)
     // * Main Cost (Prover) I: MSM of O(N)
-    let (comm_q, comm_g) = rayon::join(
-      || E::CE::commit(ck, &q_poly.coeffs, &E::Scalar::ZERO),
-      || E::CE::commit(ck, &g_poly.coeffs, &E::Scalar::ZERO),
-    );
+    let (comm_q, comm_g) = {
+      #[cfg(feature = "mercury-timing")]
+      let _msm_guard = TimingGuard::new("prove::msm_commit_q_g");
+
+      rayon::join(
+        || E::CE::commit(ck, &q_poly.coeffs, &E::Scalar::ZERO),
+        || E::CE::commit(ck, &g_poly.coeffs, &E::Scalar::ZERO),
+      )
+    };
     transcript.absorb(LABEL_Q, &[comm_q].to_vec().as_slice());
     transcript.absorb(LABEL_G, &[comm_g].to_vec().as_slice());
 
@@ -1008,10 +1049,15 @@ where
     };
 
     // * Send commitments of 7. and 8.
-    let (comm_s, comm_d) = rayon::join(
-      || E::CE::commit(ck, &s_poly.coeffs, &E::Scalar::ZERO),
-      || E::CE::commit(ck, &d_poly.coeffs, &E::Scalar::ZERO),
-    );
+    let (comm_s, comm_d) = {
+      #[cfg(feature = "mercury-timing")]
+      let _msm_guard = TimingGuard::new("prove::msm_commit_s_d");
+
+      rayon::join(
+        || E::CE::commit(ck, &s_poly.coeffs, &E::Scalar::ZERO),
+        || E::CE::commit(ck, &d_poly.coeffs, &E::Scalar::ZERO),
+      )
+    };
 
     transcript.absorb(LABEL_S, &[comm_s].to_vec().as_slice());
     transcript.absorb(LABEL_D, &[comm_d].to_vec().as_slice());
@@ -1097,6 +1143,9 @@ where
     // * 11. Mercury Section 6. Step 4. (d)
     // * Main Cost (Prover) II: MSM of O(N)
     let comm_quot_f = {
+      #[cfg(feature = "mercury-timing")]
+      let _msm_guard = TimingGuard::new("prove::msm_commit_quot_f");
+
       let mut quot_f = quot_f;
       quot_f.coeffs.truncate(original_size);
       quot_f.trim();
@@ -1108,29 +1157,34 @@ where
     let BatchArg {
       comm_w,
       comm_w_prime,
-    } = generate_batch_evaluate_arg::<E>(
-      ck,
-      BatchEvaluationInput {
-        evals: BatchEvaluations {
-          g_zeta,
-          g_zeta_inv,
-          h_zeta,
-          h_zeta_inv,
-          h_alpha,
-          s_zeta,
-          s_zeta_inv,
-          d_zeta,
-          zeta,
-          zeta_inv: *zeta_inv,
-          alpha,
+    } = {
+      #[cfg(feature = "mercury-timing")]
+      let _batch_guard = TimingGuard::new("prove::batch_evaluation_arg");
+
+      generate_batch_evaluate_arg::<E>(
+        ck,
+        BatchEvaluationInput {
+          evals: BatchEvaluations {
+            g_zeta,
+            g_zeta_inv,
+            h_zeta,
+            h_zeta_inv,
+            h_alpha,
+            s_zeta,
+            s_zeta_inv,
+            d_zeta,
+            zeta,
+            zeta_inv: *zeta_inv,
+            alpha,
+          },
+          g_poly: &g_poly,
+          h_poly: &h_poly,
+          s_poly: &s_poly,
+          d_poly: &d_poly,
         },
-        g_poly: &g_poly,
-        h_poly: &h_poly,
-        s_poly: &s_poly,
-        d_poly: &d_poly,
-      },
-      transcript,
-    )?;
+        transcript,
+      )?
+    };
 
     // For Pairing Check Batch
     transcript.absorb(LABEL_W_PRIME, &[comm_w_prime].to_vec().as_slice());
@@ -1310,7 +1364,12 @@ where
         .collect::<Vec<_>>();
 
       // * Main Cost (Verifier) I: MSM of 3
-      let ll = *comm_f + Commitment::new(E::GE::vartime_multiscalar_mul(&scalars, &bases));
+      let ll = {
+        #[cfg(feature = "mercury-timing")]
+        let _msm_guard = TimingGuard::new("verify::msm_check_f");
+
+        *comm_f + Commitment::new(E::GE::vartime_multiscalar_mul(&scalars, &bases))
+      };
       let rl = arg.comm_quot_f;
 
       #[cfg(debug_assertions)]
@@ -1360,8 +1419,12 @@ where
     let ll = lhs_1_1 + lhs_1_2 * d;
     let rl = lhs_2_1 + lhs_2_2 * d;
 
-    let pairing_l = E::GE::pairing(&ll.into_inner(), &lr);
-    let pairing_r = E::GE::pairing(&rl.into_inner(), &rr);
+    let (pairing_l, pairing_r) = {
+      #[cfg(feature = "mercury-timing")]
+      let _pairing_guard = TimingGuard::new("verify::pairing_check");
+
+      (E::GE::pairing(&ll.into_inner(), &lr), E::GE::pairing(&rl.into_inner(), &rr))
+    };
 
     if pairing_l != pairing_r {
       return Err(NovaError::ProofVerifyError {
