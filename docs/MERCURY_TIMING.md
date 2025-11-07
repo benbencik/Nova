@@ -13,12 +13,19 @@ cargo build --release --features mercury-timing
 ### 2. Run Tests with Timing
 
 ```bash
-# Run a specific mercury test
+# Run basic mercury tests
 cargo test --release --features mercury-timing mercury::tests::test_mercury_evaluation_engine_15
 
-# Run all mercury tests
-cargo test --release --features mercury-timing mercury::tests
+# Run comprehensive performance tests with multiple instance sizes (RECOMMENDED)
+cargo test --release --features mercury-timing mercury_performance_tests -- --nocapture --test-threads=1
 ```
+
+The performance tests include:
+- **Small instance** (log_n=10, n=1024) - Quick validation
+- **Medium instance** (log_n=14, n=16384) - Typical workload
+- **Large instance** (log_n=16, n=65536) - Stress test
+- **Scaling analysis** - Compares performance across 5 different sizes
+- **Category breakdown** - Shows how cost distribution changes with size
 
 The timing instrumentation is embedded in the mercury.rs code and will collect performance data when the feature is enabled.
 
@@ -27,6 +34,37 @@ The timing instrumentation is embedded in the mercury.rs code and will collect p
 ```bash
 cargo run --release --features mercury-timing --example mercury_timing
 ```
+
+## Performance Test Output
+
+The comprehensive performance tests provide detailed insights:
+
+### Small Instance Output
+```
+=== SMALL INSTANCE ===
+Prove time: 39.02 ms
+Verify time: 3.25 ms
+
+Performance Breakdown by Category:
+  MSM/Commitments                27.84 ms ( 83.4%)
+  Batch Evaluation                3.21 ms (  9.6%)
+  Pairing/Verification            1.48 ms (  4.4%)
+  Polynomial Ops                  0.66 ms (  2.0%)
+  FFT Operations                  0.17 ms (  0.5%)
+```
+
+### Scaling Analysis Output
+```
+Size                     n      Prove (ms)     Verify (ms)      Total (ms)
+---------------------------------------------------------------------------
+Tiny                   256           20.32            3.80           24.12
+Small                 1024           37.27            3.18           40.46
+Medium-Small          4096          100.43            3.23          103.66
+Medium               16384          287.56            3.64          291.20
+Medium-Large         32768          523.53            3.27          526.81
+```
+
+This demonstrates the expected O(n) scaling for the prover and O(1) for the verifier!
 
 ## What Gets Timed
 

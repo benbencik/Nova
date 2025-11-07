@@ -1501,3 +1501,8 @@ mod tests {
     prove_and_verify::<EE>(16);
   }
 }
+
+// Performance tests with timing instrumentation - multiple instance sizes
+#[cfg(all(test, feature = "mercury-timing"))]
+#[path = "mercury_tests.rs"]
+mod mercury_performance_tests;
