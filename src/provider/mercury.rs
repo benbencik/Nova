@@ -12,6 +12,45 @@
 //! Samaritan presents a similar construction and achieves the same performance, see <https://eprint.iacr.org/2025/419.pdf>.
 
 use std::{cmp::max, marker::PhantomData};
+use std::sync::Mutex;
+
+/// timing measurements
+#[derive(Debug, Clone, Copy)]
+pub struct MercuryTimings {
+  /// time spent in divide_by_binomial operation (milliseconds)
+  pub gq_poly_construction_ms: f64,
+  /// time spent in pairing operations (milliseconds)
+  pub pairing_operations_ms: f64,
+}
+
+/// global timing measurements
+static MERCURY_TIMINGS: Mutex<MercuryTimings> = Mutex::new(MercuryTimings {
+  gq_poly_construction_ms: 0.0,
+  pairing_operations_ms: 0.0,
+});
+
+impl MercuryTimings {
+  /// get the current timing measurements
+  pub fn get() -> Self {
+    *MERCURY_TIMINGS.lock().unwrap()
+  }
+
+  /// set timing
+  pub fn set_divide_by_binomial(ms: f64) {
+    MERCURY_TIMINGS.lock().unwrap().gq_poly_construction_ms = ms;
+  }
+
+  /// set timing
+  pub fn set_pairing_operations(ms: f64) {
+    MERCURY_TIMINGS.lock().unwrap().pairing_operations_ms = ms;
+  }
+}
+
+/// public helper function for benchmarking
+pub fn evaluate_multilinear<Scalar: PrimeField>(poly: &[Scalar], point: &[Scalar]) -> Scalar {
+  use crate::spartan::polys::multilinear::MultilinearPolynomial;
+  MultilinearPolynomial::new(poly.to_vec()).evaluate(point)
+}
 
 use ff::{Field, PrimeField};
 use halo2curves::fft::best_fft;
@@ -794,6 +833,7 @@ where
   ) -> Result<Self::EvaluationArgument, NovaError> {
     use batch_evaluation::*;
     use transcript_labels::*;
+    use std::time::Instant;
 
     let comm_f = comm;
 
@@ -880,7 +920,13 @@ where
 
     // * 4. Mercury Section 6. Step 2. (b)
     // Compute q(X) and g(X)
-    let (mut q_poly, g_poly) = divide_by_binomial(&f_poly, b, b, &alpha);
+    let (mut q_poly, g_poly) = {
+      let start = Instant::now();
+      let result = divide_by_binomial(&f_poly, b, b, &alpha);
+      let elapsed = start.elapsed();
+      MercuryTimings::set_divide_by_binomial(elapsed.as_secs_f64() * 1000.0);
+      result
+    };
 
     q_poly.trim();
 
@@ -1164,6 +1210,7 @@ where
   ) -> Result<(), NovaError> {
     use batch_evaluation::*;
     use transcript_labels::*;
+    use std::time::Instant;
 
     let comm_f = comm;
 
@@ -1360,8 +1407,14 @@ where
     let ll = lhs_1_1 + lhs_1_2 * d;
     let rl = lhs_2_1 + lhs_2_2 * d;
 
-    let pairing_l = E::GE::pairing(&ll.into_inner(), &lr);
-    let pairing_r = E::GE::pairing(&rl.into_inner(), &rr);
+    let (pairing_l, pairing_r) = {
+      let start = Instant::now();
+      let pairing_l = E::GE::pairing(&ll.into_inner(), &lr);
+      let pairing_r = E::GE::pairing(&rl.into_inner(), &rr);
+      let elapsed = start.elapsed();
+      MercuryTimings::set_pairing_operations(elapsed.as_secs_f64() * 1000.0);
+      (pairing_l, pairing_r)
+    };
 
     if pairing_l != pairing_r {
       return Err(NovaError::ProofVerifyError {

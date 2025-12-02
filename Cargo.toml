@@ -71,6 +71,10 @@ harness = false
 name = "sumcheckeq"
 harness = false
 
+[[bin]]
+name = "mercury"
+path = "benches/mercury.rs"
+
 [features]
 default = ["halo2curves/asm"]
 flamegraph = ["pprof2/flamegraph", "pprof2/criterion"]
