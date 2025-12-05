@@ -21,12 +21,21 @@ pub struct MercuryTimings {
   pub gq_poly_construction_ms: f64,
   /// time spent in pairing operations (milliseconds)
   pub pairing_operations_ms: f64,
+  /// time spent committing q and g in parallel (milliseconds)
+  pub commit_qg_ms: f64,
+  /// time spent committing h (milliseconds)
+  pub commit_h_ms: f64,
+  /// time spent committing batch proof (π') (milliseconds)
+  pub commit_batch_proof_ms: f64,
 }
 
 /// global timing measurements
 static MERCURY_TIMINGS: Mutex<MercuryTimings> = Mutex::new(MercuryTimings {
   gq_poly_construction_ms: 0.0,
   pairing_operations_ms: 0.0,
+  commit_qg_ms: 0.0,
+  commit_h_ms: 0.0,
+  commit_batch_proof_ms: 0.0,
 });
 
 impl MercuryTimings {
@@ -43,6 +52,21 @@ impl MercuryTimings {
   /// set timing
   pub fn set_pairing_operations(ms: f64) {
     MERCURY_TIMINGS.lock().unwrap().pairing_operations_ms = ms;
+  }
+
+  /// set timing
+  pub fn set_commit_qg(ms: f64) {
+    MERCURY_TIMINGS.lock().unwrap().commit_qg_ms = ms;
+  }
+
+  /// set timing 
+  pub fn set_commit_h(ms: f64) {
+    MERCURY_TIMINGS.lock().unwrap().commit_h_ms = ms;
+  }
+
+  /// set timing 
+  pub fn set_commit_batch_proof(ms: f64) {
+    MERCURY_TIMINGS.lock().unwrap().commit_batch_proof_ms = ms;
   }
 }
 
@@ -695,7 +719,13 @@ mod batch_evaluation {
     };
 
     // W'(X) = quot_l(X)
-    let comm_w_prime = E::CE::commit(ck, &quot_l_poly.coeffs, &E::Scalar::ZERO);
+    let comm_w_prime = {
+      let start = std::time::Instant::now();
+      let c = E::CE::commit(ck, &quot_l_poly.coeffs, &E::Scalar::ZERO);
+      let elapsed = start.elapsed();
+      super::MercuryTimings::set_commit_batch_proof(elapsed.as_secs_f64() * 1000.0);
+      c
+    };
 
     Ok(BatchArg {
       comm_w,
@@ -912,7 +942,13 @@ where
     }
 
     // * 2. Mercury Section 6. Step 1. (b)
-    let comm_h = E::CE::commit(ck, &h_poly.coeffs, &E::Scalar::ZERO);
+    let comm_h = {
+      let start = Instant::now();
+      let c = E::CE::commit(ck, &h_poly.coeffs, &E::Scalar::ZERO);
+      let elapsed = start.elapsed();
+      MercuryTimings::set_commit_h(elapsed.as_secs_f64() * 1000.0);
+      c
+    };
     transcript.absorb(LABEL_H, &[comm_h].to_vec().as_slice());
 
     // * 3. Mercury Section 6. Step 2. (a)
@@ -977,10 +1013,16 @@ where
 
     // * 5. Mercury Section 6. Step 2. (c)
     // * Main Cost (Prover) I: MSM of O(N)
-    let (comm_q, comm_g) = rayon::join(
-      || E::CE::commit(ck, &q_poly.coeffs, &E::Scalar::ZERO),
-      || E::CE::commit(ck, &g_poly.coeffs, &E::Scalar::ZERO),
-    );
+    let (comm_q, comm_g) = {
+      let start = Instant::now();
+      let (cq, cg) = rayon::join(
+        || E::CE::commit(ck, &q_poly.coeffs, &E::Scalar::ZERO),
+        || E::CE::commit(ck, &g_poly.coeffs, &E::Scalar::ZERO),
+      );
+      let elapsed = start.elapsed();
+      MercuryTimings::set_commit_qg(elapsed.as_secs_f64() * 1000.0);
+      (cq, cg)
+    };
     transcript.absorb(LABEL_Q, &[comm_q].to_vec().as_slice());
     transcript.absorb(LABEL_G, &[comm_g].to_vec().as_slice());
 
