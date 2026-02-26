@@ -21,8 +21,10 @@ pub struct MercuryTimings {
   pub gq_poly_construction_ms: f64,
   /// time spent in pairing operations (milliseconds)
   pub pairing_operations_ms: f64,
-  /// time spent committing q and g in parallel (milliseconds)
-  pub commit_qg_ms: f64,
+  /// time spent committing q (milliseconds)
+  pub commit_q_ms: f64,
+  /// time spent committing g (milliseconds)
+  pub commit_g_ms: f64,
   /// time spent committing h (milliseconds)
   pub commit_h_ms: f64,
   /// time spent committing batch proof (π') (milliseconds)
@@ -33,7 +35,8 @@ pub struct MercuryTimings {
 static MERCURY_TIMINGS: Mutex<MercuryTimings> = Mutex::new(MercuryTimings {
   gq_poly_construction_ms: 0.0,
   pairing_operations_ms: 0.0,
-  commit_qg_ms: 0.0,
+  commit_q_ms: 0.0,
+  commit_g_ms: 0.0,
   commit_h_ms: 0.0,
   commit_batch_proof_ms: 0.0,
 });
@@ -55,8 +58,13 @@ impl MercuryTimings {
   }
 
   /// set timing
-  pub fn set_commit_qg(ms: f64) {
-    MERCURY_TIMINGS.lock().unwrap().commit_qg_ms = ms;
+  pub fn set_commit_q(ms: f64) {
+    MERCURY_TIMINGS.lock().unwrap().commit_q_ms = ms;
+  }
+
+  /// set timing
+  pub fn set_commit_g(ms: f64) {
+    MERCURY_TIMINGS.lock().unwrap().commit_g_ms = ms;
   }
 
   /// set timing 
@@ -942,13 +950,8 @@ where
     }
 
     // * 2. Mercury Section 6. Step 1. (b)
-    let comm_h = {
-      let start = Instant::now();
-      let c = E::CE::commit(ck, &h_poly.coeffs, &E::Scalar::ZERO);
-      let elapsed = start.elapsed();
-      MercuryTimings::set_commit_h(elapsed.as_secs_f64() * 1000.0);
-      c
-    };
+    let comm_h= E::CE::commit(ck, &h_poly.coeffs, &E::Scalar::ZERO);
+
     transcript.absorb(LABEL_H, &[comm_h].to_vec().as_slice());
 
     // * 3. Mercury Section 6. Step 2. (a)
@@ -956,6 +959,7 @@ where
 
     // * 4. Mercury Section 6. Step 2. (b)
     // Compute q(X) and g(X)
+    println!("Polynomial f degree: {}", f_poly.len().saturating_sub(1));
     let (mut q_poly, g_poly) = {
       let start = Instant::now();
       let result = divide_by_binomial(&f_poly, b, b, &alpha);
@@ -1013,16 +1017,24 @@ where
 
     // * 5. Mercury Section 6. Step 2. (c)
     // * Main Cost (Prover) I: MSM of O(N)
-    let (comm_q, comm_g) = {
+    let comm_q = {
       let start = Instant::now();
-      let (cq, cg) = rayon::join(
-        || E::CE::commit(ck, &q_poly.coeffs, &E::Scalar::ZERO),
-        || E::CE::commit(ck, &g_poly.coeffs, &E::Scalar::ZERO),
-      );
+      println!("Polynomial q degree: {}", q_poly.coeffs.len().saturating_sub(1));
+      let c = E::CE::commit(ck, &q_poly.coeffs, &E::Scalar::ZERO);
       let elapsed = start.elapsed();
-      MercuryTimings::set_commit_qg(elapsed.as_secs_f64() * 1000.0);
-      (cq, cg)
+      MercuryTimings::set_commit_q(elapsed.as_secs_f64() * 1000.0);
+      c
     };
+    
+    let comm_g = {
+      let start = Instant::now();
+      println!("Polynomial g degree: {}", g_poly.coeffs.len().saturating_sub(1));
+      let c = E::CE::commit(ck, &g_poly.coeffs, &E::Scalar::ZERO);
+      let elapsed = start.elapsed();
+      MercuryTimings::set_commit_g(elapsed.as_secs_f64() * 1000.0);
+      c
+    };
+    
     transcript.absorb(LABEL_Q, &[comm_q].to_vec().as_slice());
     transcript.absorb(LABEL_G, &[comm_g].to_vec().as_slice());
 
@@ -1185,10 +1197,14 @@ where
     // * 11. Mercury Section 6. Step 4. (d)
     // * Main Cost (Prover) II: MSM of O(N)
     let comm_quot_f = {
+      let start = Instant::now();
       let mut quot_f = quot_f;
       quot_f.coeffs.truncate(original_size);
       quot_f.trim();
-      E::CE::commit(ck, &quot_f.coeffs, &E::Scalar::ZERO)
+      let c = E::CE::commit(ck, &quot_f.coeffs, &E::Scalar::ZERO);
+      let elapsed = start.elapsed();
+      MercuryTimings::set_commit_h(elapsed.as_secs_f64() * 1000.0);
+      c
     };
     transcript.absorb(LABEL_QUOT_F, &[comm_quot_f].to_vec().as_slice());
 

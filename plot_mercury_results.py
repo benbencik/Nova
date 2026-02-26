@@ -82,25 +82,28 @@ def plot_commitment_timings(csv_file='mercury_commitment_timings.csv'):
 
     # Set colors for consistency
     color_total = '#333333'
-    color_qg = '#1f77b4'  # blue
-    color_h = '#ff7f0e'   # orange
-    color_batch = '#2ca02c' # green
+    color_g = '#1f77b4'  # blue
+    color_q = '#ff7f0e'   # orange
+    color_h = '#2ca02c' # green
+    color_batch = '#d62728' # red
 
     # Absolute times
     ax1.plot(df['log_n'], df['total_prover_ms'], 'o-', label='total prover time', color=color_total)
-    ax1.plot(df['log_n'], df['commit_qg_ms'], 's-', label='commit q and g', color=color_qg)
-    ax1.plot(df['log_n'], df['commit_h_ms'], '^-', label='commit h', color=color_h)
+    ax1.plot(df['log_n'], df['commit_q_ms'], 's-', label='commit q', color=color_q)
+    ax1.plot(df['log_n'], df['commit_g_ms'], '^-', label='commit g', color=color_g)
+    ax1.plot(df['log_n'], df['commit_h_ms'], 'v-', label='commit H', color=color_h)
     ax1.plot(df['log_n'], df['commit_batch_proof_ms'], 'd-', label="commit batch proof", color=color_batch)
     ax1.set_xlabel('log(n)')
-    ax1.set_ylabel('time (ms)')
+    ax1.set_ylabel('time log scale(ms)')
     ax1.set_title('mercury commitment timings')
     ax1.grid(True, alpha=0.5)
-    # ax1.set_yscale('log')
+    ax1.set_yscale('log')
     ax1.legend()
 
     # Percentages
-    ax2.plot(df['log_n'], df['commit_qg_pct'], 's-', label='commit q and g (%)', color=color_qg)
-    ax2.plot(df['log_n'], df['commit_h_pct'], '^-', label='commit h (%)', color=color_h)
+    ax2.plot(df['log_n'], df['commit_q_pct'], 's-', label='commit q (%)', color=color_q)
+    ax2.plot(df['log_n'], df['commit_g_pct'], '^-', label='commit g (%)', color=color_g)
+    ax2.plot(df['log_n'], df['commit_h_pct'], 'v-', label='commit H (%)', color=color_h)
     ax2.plot(df['log_n'], df['commit_batch_proof_pct'], 'd-', label="commit batch proof (%)", color=color_batch)
     ax2.set_xlabel('log(n)')
     ax2.set_ylabel('percentage of prover time (%)')
@@ -111,7 +114,8 @@ def plot_commitment_timings(csv_file='mercury_commitment_timings.csv'):
 
     # # Add text labels for percentages
     # for i, row in df.iterrows():
-    #     ax2.text(row['log_n'], row['commit_qg_pct'] + 2, f"{row['commit_qg_pct']:.1f}%", ha='center')
+    #     ax2.text(row['log_n'], row['commit_q_pct'] + 2, f"{row['commit_q_pct']:.1f}%", ha='center')
+    #     ax2.text(row['log_n'], row['commit_g_pct'] + 2, f"{row['commit_g_pct']:.1f}%", ha='center')
     #     ax2.text(row['log_n'], row['commit_h_pct'] + 2, f"{row['commit_h_pct']:.1f}%", ha='center')
     #     ax2.text(row['log_n'], row['commit_batch_proof_pct'] + 2, f"{row['commit_batch_proof_pct']:.1f}%", ha='center')
 
