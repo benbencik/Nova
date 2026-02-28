@@ -6,6 +6,7 @@ pub mod bivariatekzg;
 pub mod ipa_pc;
 pub mod keccak;
 pub mod mercury;
+pub mod chopin;
 pub mod msm;
 pub mod pasta;
 pub mod pedersen;
