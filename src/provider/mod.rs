@@ -2,6 +2,7 @@
 
 pub mod bn256_grumpkin;
 pub mod hyperkzg;
+pub mod bivariatekzg;
 pub mod ipa_pc;
 pub mod keccak;
 pub mod mercury;
@@ -19,6 +20,7 @@ pub mod ptau;
 
 use crate::{
   provider::{
+    bivariatekzg::CommitmentEngine as BivariateKZGCommitmentEngine,
     bn256_grumpkin::{bn256, grumpkin},
     hyperkzg::CommitmentEngine as HyperKZGCommitmentEngine,
     keccak::Keccak256Transcript,
@@ -36,6 +38,10 @@ use serde::{Deserialize, Serialize};
 /// An implementation of Nova traits with HyperKZG over the BN256 curve
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Bn256EngineKZG;
+
+/// An implementation of Nova traits with BivariateKZG over the BN256 curve
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Bn256EngineBivariateKZG;
 
 /// An implementation of the Nova `Engine` trait with Grumpkin curve and Pedersen commitment scheme
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -55,6 +61,18 @@ impl Engine for Bn256EngineKZG {
   type RO2Circuit = PoseidonROCircuit<Self::Scalar>;
   type TE = Keccak256Transcript<Self>;
   type CE = HyperKZGCommitmentEngine<Self>;
+}
+
+impl Engine for Bn256EngineBivariateKZG {
+  type Base = bn256::Base;
+  type Scalar = bn256::Scalar;
+  type GE = bn256::Point;
+  type RO = PoseidonRO<Self::Base>;
+  type ROCircuit = PoseidonROCircuit<Self::Base>;
+  type RO2 = PoseidonRO<Self::Scalar>;
+  type RO2Circuit = PoseidonROCircuit<Self::Scalar>;
+  type TE = Keccak256Transcript<Self>;
+  type CE = BivariateKZGCommitmentEngine<Self>;
 }
 
 impl Engine for Bn256EngineIPA {
