@@ -121,8 +121,8 @@ pub trait PairingGroup: DlogGroupExt {
   /// A type representing the second group
   type G2: DlogGroup<Scalar = Self::Scalar, Base = Self::Base>;
 
-  /// A type representing the target group
-  type GT: PartialEq + Eq;
+  /// A type representing the target group (with additive group operations for multi-pairing checks)
+  type GT: PartialEq + Eq + core::ops::Add<Output = Self::GT>;
 
   /// A method to compute a pairing
   fn pairing(p: &Self, q: &Self::G2) -> Self::GT;

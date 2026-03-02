@@ -1,10 +1,10 @@
-//! This module implements Nova's evaluation engine using `HyperKZG`, a KZG-based polynomial commitment for multilinear polynomials
-//! HyperKZG is based on the transformation from univariate PCS to multilinear PCS in the Gemini paper (section 2.4.2 in <https://eprint.iacr.org/2022/420.pdf>).
-//! However, there are some key differences:
-//! (1) HyperKZG works with multilinear polynomials represented in evaluation form (rather than in coefficient form in Gemini's transformation).
-//! This means that Spartan's polynomial IOP can use commit to its polynomials as-is without incurring any interpolations or FFTs.
-//! (2) HyperKZG is specialized to use KZG as the univariate commitment scheme, so it includes several optimizations (both during the transformation of multilinear-to-univariate claims
-//! and within the KZG commitment scheme implementation itself).
+//! This module implements Nova's evaluation engine using Bivariate KZG, a KZG-based polynomial
+//! commitment scheme for bivariate polynomials f(X, Y).
+//!
+//! The commitment key stores a univariate SRS {[tau^k]_1} for k = 0..n-1 along with
+//! sigma_H = [tau^b]_2 where b = sqrt(n) and sigma = tau^b (implicit second trapdoor).
+//! With column-major indexing (ck[j*b+i] = [tau^i sigma^j]_1), the MSM commitment equals
+//! [f(tau,sigma)]_1 for the bivariate polynomial f.
 #![allow(non_snake_case)]
 #[cfg(feature = "io")]
 use crate::provider::{ptau::PtauFileError, read_ptau, write_ptau};
@@ -19,16 +19,13 @@ use crate::{
     commitment::{CommitmentEngineTrait, CommitmentTrait, Len},
     evaluation::EvaluationEngineTrait,
     evm_serde::EvmCompatSerde,
-    AbsorbInRO2Trait, AbsorbInROTrait, Engine, Group, ROTrait, TranscriptEngineTrait,
-    TranscriptReprTrait,
+    AbsorbInRO2Trait, AbsorbInROTrait, Engine, Group, ROTrait, TranscriptReprTrait,
   },
 };
 use core::{
-  iter,
   marker::PhantomData,
   ops::Range,
   ops::{Add, Mul, MulAssign},
-  slice,
 };
 use ff::Field;
 #[cfg(any(test, feature = "test-utils"))]
@@ -47,8 +44,6 @@ type G1Affine<E> = <<E as Engine>::GE as DlogGroup>::AffineGroupElement;
 /// Alias to points on G1 that are in preprocessed form
 type G2Affine<E> = <<<E as Engine>::GE as PairingGroup>::G2 as DlogGroup>::AffineGroupElement;
 
-/// Default number of target chunks used in splitting up polynomial division in the kzg_open closure
-const DEFAULT_TARGET_CHUNKS: usize = 1 << 10;
 
 /// KZG commitment key
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +54,7 @@ where
   ck: Vec<<E::GE as DlogGroup>::AffineGroupElement>,
   h: <E::GE as DlogGroup>::AffineGroupElement,
   tau_H: <<E::GE as PairingGroup>::G2 as DlogGroup>::AffineGroupElement, // needed only for the verifier key
+  sigma_H: <<E::GE as PairingGroup>::G2 as DlogGroup>::AffineGroupElement, // [tau^b]_2 for bivariate KZG
 }
 
 impl<E: Engine> CommitmentKey<E>
@@ -70,8 +66,14 @@ where
     ck: Vec<<E::GE as DlogGroup>::AffineGroupElement>,
     h: <E::GE as DlogGroup>::AffineGroupElement,
     tau_H: <<E::GE as PairingGroup>::G2 as DlogGroup>::AffineGroupElement,
+    sigma_H: <<E::GE as PairingGroup>::G2 as DlogGroup>::AffineGroupElement,
   ) -> Self {
-    Self { ck, h, tau_H }
+    Self {
+      ck,
+      h,
+      tau_H,
+      sigma_H,
+    }
   }
 
   /// Returns a reference to the ck field
@@ -89,6 +91,11 @@ where
     &self.tau_H
   }
 
+  /// Returns a reference to the sigma_H field ([tau^b]_2 for bivariate KZG)
+  pub fn sigma_H(&self) -> &<<E::GE as PairingGroup>::G2 as DlogGroup>::AffineGroupElement {
+    &self.sigma_H
+  }
+
   /// Returns the coordinates of the generator points.
   ///
   /// # Panics
@@ -104,6 +111,13 @@ where
         (x, y)
       })
       .collect()
+  }
+
+  /// Compute b = 2^(floor(log2(num_gens)/2)), i.e. the floor-square-root of num_gens.
+  /// Requires num_gens to be a power of 2.
+  pub(crate) fn compute_b(num_gens: usize) -> usize {
+    let log = usize::BITS - num_gens.leading_zeros() - 1; // log2(num_gens) for power-of-2 inputs
+    1_usize << (log / 2)
   }
 }
 
@@ -359,6 +373,7 @@ where
 
   fn setup_from_tau_fixed_base_exp(label: &'static [u8], powers_of_tau: &[E::Scalar]) -> Self {
     let tau = powers_of_tau[1];
+    let num_gens = powers_of_tau.len();
 
     let gen = <E::GE as DlogGroup>::gen();
 
@@ -369,7 +384,16 @@ where
 
     let tau_H = (<<E::GE as PairingGroup>::G2 as DlogGroup>::gen() * tau).affine();
 
-    Self { ck, h, tau_H }
+    // sigma_H = [tau^b]_2 where b = sqrt(num_gens) (for bivariate KZG)
+    let b = Self::compute_b(num_gens);
+    let sigma_H = (<<E::GE as PairingGroup>::G2 as DlogGroup>::gen() * powers_of_tau[b]).affine();
+
+    Self {
+      ck,
+      h,
+      tau_H,
+      sigma_H,
+    }
   }
 
   fn setup_from_tau_direct(
@@ -388,7 +412,16 @@ where
 
     let tau_H = (<<E::GE as PairingGroup>::G2 as DlogGroup>::gen() * tau).affine();
 
-    Self { ck, h, tau_H }
+    // sigma_H = [tau^b]_2 where b = sqrt(num_gens) (for bivariate KZG)
+    let b = Self::compute_b(num_gens);
+    let sigma_H = (<<E::GE as PairingGroup>::G2 as DlogGroup>::gen() * powers_of_tau[b]).affine();
+
+    Self {
+      ck,
+      h,
+      tau_H,
+      sigma_H,
+    }
   }
 
   fn compute_powers_serial(tau: E::Scalar, n: usize) -> Vec<E::Scalar> {
@@ -644,16 +677,26 @@ where
   ) -> Result<Self::CommitmentKey, PtauFileError> {
     let num = n.next_power_of_two();
 
-    // read points as well as check sanity of ptau file
-    let (g1_points, g2_points) = read_ptau(reader, num, 2)?;
+    // b = sqrt(num) so that sigma_H = [tau^b]_2 for bivariate KZG
+    let b = CommitmentKey::<E>::compute_b(num);
+
+    // read points as well as check sanity of ptau file; read b+1 G2 points to get [tau^b]_2
+    let (g1_points, g2_points) = read_ptau(reader, num, b + 1)?;
 
     let ck = g1_points.to_vec();
 
-    let tau_H = *g2_points.last().unwrap();
+    // Standard ptau: g2_points[0]=[1]_2, g2_points[1]=[tau]_2, ..., g2_points[b]=[tau^b]_2
+    let tau_H = g2_points[1];
+    let sigma_H = g2_points[b];
 
     let h = *E::GE::from_label(label, 1).first().unwrap();
 
-    Ok(CommitmentKey { ck, h, tau_H })
+    Ok(CommitmentKey {
+      ck,
+      h,
+      tau_H,
+      sigma_H,
+    })
   }
 
   /// Save keys
@@ -663,9 +706,16 @@ where
     mut writer: &mut (impl std::io::Write + std::io::Seek),
   ) -> Result<(), PtauFileError> {
     let g1_points = ck.ck.clone();
+    let num = g1_points.len().next_power_of_two();
+    let power = num.trailing_zeros() + 1;
 
-    let g2_points = vec![ck.tau_H, ck.tau_H];
-    let power = g1_points.len().next_power_of_two().trailing_zeros() + 1;
+    // Build b+1 G2 points: [G2_gen, tau_H, ..., sigma_H] matching the load_setup format.
+    // Index 0 = G2 generator, index 1 = [tau]_2, index b = [tau^b]_2 = sigma_H.
+    let b = CommitmentKey::<E>::compute_b(num);
+    let g2_gen = <<E::GE as PairingGroup>::G2 as DlogGroup>::gen().affine();
+    let mut g2_points = vec![g2_gen; b + 1];
+    g2_points[1] = ck.tau_H;
+    g2_points[b] = ck.sigma_H;
 
     write_ptau(&mut writer, g1_points, g2_points, power)
   }
@@ -747,9 +797,11 @@ where
   pub(crate) H: G2Affine<E>,
   #[serde_as(as = "EvmCompatSerde")]
   pub(crate) tau_H: G2Affine<E>,
+  #[serde_as(as = "EvmCompatSerde")]
+  pub(crate) sigma_H: G2Affine<E>, // [tau^b]_2 for bivariate KZG verification
 }
 
-/// Provides an implementation of a polynomial evaluation argument
+/// Bivariate KZG evaluation argument: (π1, π2) proving f(α,β) = η
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
@@ -757,83 +809,32 @@ pub struct EvaluationArgument<E: Engine>
 where
   E::GE: PairingGroup,
 {
-  #[serde_as(as = "Vec<EvmCompatSerde>")]
-  com: Vec<G1Affine<E>>,
-  #[serde_as(as = "[EvmCompatSerde; 3]")]
-  w: [G1Affine<E>; 3],
-  #[serde_as(as = "Vec<[EvmCompatSerde; 3]>")]
-  v: Vec<[E::Scalar; 3]>,
+  #[serde_as(as = "EvmCompatSerde")]
+  /// [q1(τ,σ)]_1: commitment to bivariate quotient q1(X,Y) = (f(X,Y) - f(α,Y)) / (X - α)
+  pi1: G1Affine<E>,
+  #[serde_as(as = "EvmCompatSerde")]
+  /// [q2(σ)]_1: commitment to univariate quotient q2(Y) = (f(α,Y) - η) / (Y - β)
+  pi2: G1Affine<E>,
 }
 
 impl<E: Engine> EvaluationArgument<E>
 where
   E::GE: PairingGroup,
 {
-  /// Create a new evaluation argument
-  pub fn new(com: Vec<G1Affine<E>>, w: [G1Affine<E>; 3], v: Vec<[E::Scalar; 3]>) -> Self {
-    Self { com, w, v }
+  /// Returns the π1 proof element
+  pub fn pi1(&self) -> &G1Affine<E> {
+    &self.pi1
   }
-  /// The KZG commitments to intermediate polynomials
-  pub fn com(&self) -> &[G1Affine<E>] {
-    &self.com
-  }
-  /// The KZG witnesses for batch openings
-  pub fn w(&self) -> &[G1Affine<E>] {
-    &self.w
-  }
-  /// The evaluations of the polynomials at challenge points
-  pub fn v(&self) -> &[[E::Scalar; 3]] {
-    &self.v
+  /// Returns the π2 proof element
+  pub fn pi2(&self) -> &G1Affine<E> {
+    &self.pi2
   }
 }
 
-/// Provides an implementation of a polynomial evaluation engine using KZG
+/// Provides an implementation of a polynomial evaluation engine using Bivariate KZG
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EvaluationEngine<E: Engine> {
   _p: PhantomData<E>,
-}
-
-impl<E: Engine> EvaluationEngine<E>
-where
-  E::GE: PairingGroup,
-{
-  // This impl block defines helper functions that are not a part of
-  // EvaluationEngineTrait, but that we will use to implement the trait methods.
-  fn compute_challenge(com: &[G1Affine<E>], transcript: &mut <E as Engine>::TE) -> E::Scalar {
-    transcript.absorb(b"c", &com.to_vec().as_slice());
-
-    transcript.squeeze(b"c").unwrap()
-  }
-
-  // Compute challenge q = Hash(vk, C0, ..., C_{k-1}, u0, ...., u_{t-1},
-  // (f_i(u_j))_{i=0..k-1,j=0..t-1})
-  fn get_batch_challenge(v: &[[E::Scalar; 3]], transcript: &mut <E as Engine>::TE) -> E::Scalar {
-    transcript.absorb(
-      b"v",
-      &v.iter()
-        .flatten()
-        .cloned()
-        .collect::<Vec<E::Scalar>>()
-        .as_slice(),
-    );
-
-    transcript.squeeze(b"r").unwrap()
-  }
-
-  fn batch_challenge_powers(q: E::Scalar, k: usize) -> Vec<E::Scalar> {
-    // Compute powers of q : (1, q, q^2, ..., q^(k-1))
-    let mut q_powers = vec![E::Scalar::ONE; k];
-    for i in 1..k {
-      q_powers[i] = q_powers[i - 1] * q;
-    }
-    q_powers
-  }
-
-  fn verifier_second_challenge(W: &[G1Affine<E>], transcript: &mut <E as Engine>::TE) -> E::Scalar {
-    transcript.absorb(b"W", &W.to_vec().as_slice());
-
-    transcript.squeeze(b"d").unwrap()
-  }
 }
 
 impl<E> EvaluationEngineTrait<E> for EvaluationEngine<E>
@@ -856,323 +857,156 @@ where
       G: E::GE::gen().affine(),
       H: <<E::GE as PairingGroup>::G2 as DlogGroup>::gen().affine(),
       tau_H: ck.tau_H,
+      sigma_H: ck.sigma_H,
     };
 
     Ok((pk, vk))
   }
 
+  /// Prove that f(α, β) = η using Bivariate KZG.
+  ///
+  /// The polynomial `hat_P` is interpreted as the coefficients of a bivariate polynomial
+  /// f(X, Y) = Σ_{i,j} f_{i,j} X^i Y^j  with column-major layout: hat_P[j*b + i] = f_{i,j}.
+  ///
+  /// With σ = τ^b (where b = sqrt(n)), the commitment ck satisfies ck[j*b+i] = [τ^i σ^j]_1,
+  /// so `CommitmentEngine::commit(ck, hat_P, 0) = [f(τ,σ)]_1` — a valid bivariate KZG commitment.
+  ///
+  /// `point = [α, β]` are the two evaluation coordinates.
   fn prove(
     ck: &CommitmentKey<E>,
     _pk: &Self::ProverKey,
-    transcript: &mut <E as Engine>::TE,
+    _transcript: &mut <E as Engine>::TE,
     _C: &Commitment<E>,
     hat_P: &[E::Scalar],
     point: &[E::Scalar],
     _eval: &E::Scalar,
   ) -> Result<Self::EvaluationArgument, NovaError> {
-    let x: Vec<E::Scalar> = point.to_vec();
-
-    //////////////// begin helper closures //////////
-    let kzg_open = |f: &[E::Scalar], u: E::Scalar| -> G1Affine<E> {
-      // Divides polynomial f(x) by (x - u) to obtain the witness polynomial h(x) = f(x)/(x - u)
-      // for KZG opening.
-      //
-      // This implementation uses a chunking strategy to enable parallelization:
-      // - Divides the polynomial into chunks
-      // - Processes chunks in parallel using Rayon's par_chunks_exact_mut
-      // - Within each chunk, maintains a "running" partial result
-      // - Combines results across chunk boundaries
-      //
-      // While this adds more total computation than the standard Horner's method,
-      // the parallel execution provides significant speedup for large polynomials.
-      //
-      // Original sequential algorithm using Horner's method:
-      // ```
-      // let mut h = vec![E::Scalar::ZERO; d];
-      // for i in (1..d).rev() {
-      //   h[i - 1] = f[i] + h[i] * u;
-      // }
-      // ```
-      //
-      // The resulting polynomial h(x) satisfies: f(x) = h(x) * (x - u)
-      // The degree of h(x) is one less than the degree of f(x).
-      let div_by_monomial =
-        |f: &[E::Scalar], u: E::Scalar, target_chunks: usize| -> Vec<E::Scalar> {
-          assert!(!f.is_empty());
-          let target_chunk_size = f.len() / target_chunks;
-          let log2_chunk_size = target_chunk_size.max(1).ilog2();
-          let chunk_size = 1 << log2_chunk_size;
-
-          let u_to_the_chunk_size = (0..log2_chunk_size).fold(u, |u_pow, _| u_pow.square());
-          let mut result = f.to_vec();
-          result
-            .par_chunks_mut(chunk_size)
-            .zip(f.par_chunks(chunk_size))
-            .for_each(|(chunk, f_chunk)| {
-              for i in (0..chunk.len() - 1).rev() {
-                chunk[i] = f_chunk[i] + u * chunk[i + 1];
-              }
-            });
-
-          let mut iter = result.chunks_mut(chunk_size).rev();
-          if let Some(last_chunk) = iter.next() {
-            let mut prev_partial = last_chunk[0];
-            for chunk in iter {
-              prev_partial = chunk[0] + u_to_the_chunk_size * prev_partial;
-              chunk[0] = prev_partial;
-            }
-          }
-
-          result[1..]
-            .par_chunks_exact_mut(chunk_size)
-            .rev()
-            .for_each(|chunk| {
-              let mut prev_partial = chunk[chunk_size - 1];
-              for e in chunk.iter_mut().rev().skip(1) {
-                prev_partial *= u;
-                *e += prev_partial;
-              }
-            });
-          result[1..].to_vec()
-        };
-
-      let target_chunks = DEFAULT_TARGET_CHUNKS;
-      let h = &div_by_monomial(f, u, target_chunks);
-
-      E::CE::commit(ck, h, &E::Scalar::ZERO).comm.affine()
-    };
-
-    let kzg_open_batch = |f: &[Vec<E::Scalar>],
-                          u: &[E::Scalar; 3],
-                          transcript: &mut <E as Engine>::TE|
-     -> (Vec<G1Affine<E>>, Vec<[E::Scalar; 3]>) {
-      let poly_eval = |f: &[E::Scalar], u: E::Scalar| -> E::Scalar {
-        // Horner's method
-        let mut acc = E::Scalar::ZERO;
-        for &fi in f.iter().rev() {
-          acc = acc * u + fi;
-        }
-
-        acc
-      };
-
-      let scalar_vector_muladd = |a: &mut Vec<E::Scalar>, v: &Vec<E::Scalar>, s: E::Scalar| {
-        assert!(a.len() >= v.len());
-        a.par_iter_mut().zip(v.par_iter()).for_each(|(a_i, v_i)| {
-          *a_i += s * *v_i;
-        });
-      };
-
-      let kzg_compute_batch_polynomial = |f: &[Vec<E::Scalar>], q: E::Scalar| -> Vec<E::Scalar> {
-        let k = f.len(); // Number of polynomials we're batching
-
-        let q_powers = Self::batch_challenge_powers(q, k);
-
-        // Compute B(x) = f[0] + q*f[1] + q^2 * f[2] + ... q^(k-1) * f[k-1]
-        let mut B = f[0].clone();
-        for i in 1..k {
-          scalar_vector_muladd(&mut B, &f[i], q_powers[i]); // B += q_powers[i] * f[i]
-        }
-
-        B
-      };
-      ///////// END kzg_open_batch closure helpers
-
-      let k = f.len();
-      // Note: u.len() is always 3.
-
-      // The verifier needs f_i(u_j), so we compute them here
-      // (V will compute B(u_j) itself)
-      let mut v = vec![[E::Scalar::ZERO; 3]; k];
-      v.par_iter_mut().zip_eq(f).for_each(|(v_j, f)| {
-        // for each poly f
-        // for each poly f (except the last one - since it is constant)
-        v_j.par_iter_mut().enumerate().for_each(|(i, v_ij)| {
-          // for each point u
-          *v_ij = poly_eval(f, u[i]);
-        });
-      });
-
-      let q = Self::get_batch_challenge(&v, transcript);
-      let B = kzg_compute_batch_polynomial(f, q);
-
-      // Now open B at u0, ..., u_{t-1}
-      let w = u
-        .into_par_iter()
-        .map(|ui| kzg_open(&B, *ui))
-        .collect::<Vec<G1Affine<E>>>();
-
-      // The prover computes the challenge to keep the transcript in the same
-      // state as that of the verifier
-      let _d_0 = Self::verifier_second_challenge(&w, transcript);
-
-      (w, v)
-    };
-
-    ///// END helper closures //////////
-
-    let ell = x.len();
-    let n = hat_P.len();
-    assert_eq!(n, 1 << ell); // Below we assume that n is a power of two
-
-    // Phase 1  -- create commitments com_1, ..., com_\ell
-    // We do not compute final Pi (and its commitment) as it is constant and equals to 'eval'
-    // also known to verifier, so can be derived on its side as well
-    let mut polys: Vec<Vec<E::Scalar>> = Vec::new();
-    polys.push(hat_P.to_vec());
-    for i in 0..ell - 1 {
-      let Pi_len = polys[i].len() / 2;
-      let mut Pi = vec![E::Scalar::ZERO; Pi_len];
-
-      #[allow(clippy::needless_range_loop)]
-      Pi.par_iter_mut().enumerate().for_each(|(j, Pi_j)| {
-        *Pi_j = x[ell - i - 1] * (polys[i][2 * j + 1] - polys[i][2 * j]) + polys[i][2 * j];
-      });
-
-      polys.push(Pi);
+    if point.len() != 2 {
+      return Err(NovaError::InvalidInputLength);
     }
 
-    // We do not need to commit to the first polynomial as it is already committed.
-    // Compute commitments in parallel
-    let r = vec![E::Scalar::ZERO; ell - 1];
-    let com: Vec<G1Affine<E>> = E::CE::batch_commit(ck, &polys[1..], r.as_slice())
-      .par_iter()
-      .map(|i| i.comm.affine())
-      .collect();
+    let alpha = point[0];
+    let beta = point[1];
 
-    // Phase 2
-    // We do not need to add x to the transcript, because in our context x was obtained from the transcript.
-    // We also do not need to absorb `C` and `eval` as they are already absorbed by the transcript by the caller
-    let r = Self::compute_challenge(&com, transcript);
-    let u = [r, -r, r * r];
+    let n = hat_P.len();
+    // b = sqrt(n); require n to be a perfect square (i.e. ell = log2(n) must be even)
+    let b = CommitmentKey::<E>::compute_b(n.next_power_of_two());
+    let n_padded = b * b;
 
-    // Phase 3 -- create response
-    let (w, v) = kzg_open_batch(&polys, &u, transcript);
+    // Pad hat_P to n_padded with zeros if needed
+    let poly: Vec<E::Scalar> = if n == n_padded {
+      hat_P.to_vec()
+    } else {
+      let mut p = hat_P.to_vec();
+      p.resize(n_padded, E::Scalar::ZERO);
+      p
+    };
 
-    Ok(EvaluationArgument {
-      com,
-      w: w.try_into().expect("w should have length 3"),
-      v,
-    })
+    // q1 coefficients (bivariate, column-major, padded to n_padded)
+    // For each Y-column j: P_j(X) = Σ_i poly[j*b+i] X^i, divide by (X - α) → Q_j(X) + g[j]
+    let mut q1 = vec![E::Scalar::ZERO; n_padded];
+    let mut g = vec![E::Scalar::ZERO; b]; // g[j] = P_j(α) = f(α, Y)|_{Y^j coefficient}
+
+    for j in 0..b {
+      let p_j = &poly[j * b..(j + 1) * b];
+      if b > 1 {
+        // Synthetic division of P_j by (X - α) via Horner's method from the top
+        let mut quot = vec![E::Scalar::ZERO; b - 1];
+        quot[b - 2] = p_j[b - 1];
+        for i in (0..b - 2).rev() {
+          quot[i] = p_j[i + 1] + alpha * quot[i + 1];
+        }
+        g[j] = p_j[0] + alpha * quot[0]; // P_j(α)
+
+        // Store Q_j in q1 at column-major positions q1[j*b + i]
+        for i in 0..b - 1 {
+          q1[j * b + i] = quot[i];
+        }
+        // q1[j*b + (b-1)] = 0 (already)
+      } else {
+        // b == 1: each "column" is a single constant; quotient is 0, remainder is the constant
+        g[j] = p_j[0];
+      }
+    }
+
+    // π1 = [q1(τ,σ)]_1 via the standard MSM (column-major SRS with σ = τ^b)
+    let pi1 = E::CE::commit(ck, &q1, &E::Scalar::ZERO).comm.affine();
+
+    // g(Y) = Σ_j g[j] Y^j = f(α, Y)
+    // Compute eval = g(β) = f(α, β) via Horner's method
+    let eval_computed = {
+      let mut acc = E::Scalar::ZERO;
+      for &gj in g.iter().rev() {
+        acc = acc * beta + gj;
+      }
+      acc
+    };
+
+    // q2(Y) = (g(Y) - eval) / (Y - β)
+    let mut g_shifted = g.clone();
+    g_shifted[0] -= eval_computed;
+
+    let mut q2 = vec![E::Scalar::ZERO; b.saturating_sub(1)];
+    if b > 1 {
+      q2[b - 2] = g_shifted[b - 1];
+      for i in (0..b - 2).rev() {
+        q2[i] = g_shifted[i + 1] + beta * q2[i + 1];
+      }
+    }
+
+    // π2 = [q2(σ)]_1 = Σ_j q2[j] * [σ^j]_1 = Σ_j q2[j] * ck[j*b]
+    // Build a sparse vector where position j*b holds q2[j]
+    let mut q2_padded = vec![E::Scalar::ZERO; n_padded];
+    for (j, &coef) in q2.iter().enumerate() {
+      q2_padded[j * b] = coef;
+    }
+    let pi2 = E::CE::commit(ck, &q2_padded, &E::Scalar::ZERO).comm.affine();
+
+    Ok(EvaluationArgument { pi1, pi2 })
   }
 
-  /// A method to verify purported evaluations of a batch of polynomials
+  /// Verify the bivariate KZG evaluation proof.
+  ///
+  /// Checks: e(C - η·G1, [1]_2) = e(π1, [τ-α]_2) + e(π2, [σ-β]_2)
+  /// (additive GT notation; the GT addition corresponds to pairing multiplication)
   fn verify(
     vk: &Self::VerifierKey,
-    transcript: &mut <E as Engine>::TE,
+    _transcript: &mut <E as Engine>::TE,
     C: &Commitment<E>,
-    x: &[E::Scalar],
-    y: &E::Scalar,
+    point: &[E::Scalar],
+    eval: &E::Scalar,
     pi: &Self::EvaluationArgument,
   ) -> Result<(), NovaError> {
-    let ell = x.len();
-
-    // we do not need to add x to the transcript, because in our context x was
-    // obtained from the transcript
-    let r = Self::compute_challenge(&pi.com, transcript);
-
-    let u = [r, -r, r * r];
-
-    // Setup vectors (Y, ypos, yneg) from pi.v
-    if pi.v.len() != ell || pi.com.len() != ell - 1 {
-      return Err(NovaError::ProofVerifyError {
-        reason: "Invalid lengths of pi.v".to_string(),
-      });
+    if point.len() != 2 {
+      return Err(NovaError::InvalidInputLength);
     }
 
-    // Check consistency of (Y, ypos, yneg)
-    for i in 0..ell {
-      let ypos = pi.v[i][0];
-      let yneg = pi.v[i][1];
-      let Y = pi.v.get(i + 1).map_or(*y, |v| v[2]);
-      if r.double() * Y
-        != r * (E::Scalar::ONE - x[ell - i - 1]) * (ypos + yneg) + x[ell - i - 1] * (ypos - yneg)
-      {
-        return Err(NovaError::ProofVerifyError {
-          reason: "Inconsistent (Y, ypos, yneg)".to_string(),
-        });
-      }
-      // Note that we don't make any checks about Y[0] here, but our batching
-      // check below requires it
-    }
+    let alpha = point[0];
+    let beta = point[1];
 
-    // Check commitments to (Y, ypos, yneg) are valid
+    let g2_gen = <<E::GE as PairingGroup>::G2 as DlogGroup>::gen();
+    let g1_gen = E::GE::group(&vk.G);
+    let tau_h = <<E::GE as PairingGroup>::G2 as DlogGroup>::group(&vk.tau_H);
+    let sigma_h = <<E::GE as PairingGroup>::G2 as DlogGroup>::group(&vk.sigma_H);
 
-    // vk is hashed in transcript already, so we do not add it here
+    // [τ - α]_2  and  [σ - β]_2
+    let tau_minus_alpha = tau_h - g2_gen * alpha;
+    let sigma_minus_beta = sigma_h - g2_gen * beta;
 
-    let q = Self::get_batch_challenge(&pi.v, transcript);
+    // LHS = C - η·G1
+    let lhs = C.comm - g1_gen * eval;
 
-    let d_0 = Self::verifier_second_challenge(&pi.w, transcript);
-    let d_1 = d_0.square();
+    let pi1_pt = E::GE::group(&pi.pi1);
+    let pi2_pt = E::GE::group(&pi.pi2);
 
-    // We write a special case for t=3, since this what is required for
-    // hyperkzg. Following the paper directly, we must compute:
-    // let L0 = C_B - vk.G * B_u[0] + W[0] * u[0];
-    // let L1 = C_B - vk.G * B_u[1] + W[1] * u[1];
-    // let L2 = C_B - vk.G * B_u[2] + W[2] * u[2];
-    // let R0 = -W[0];
-    // let R1 = -W[1];
-    // let R2 = -W[2];
-    // let L = L0 + L1*d_0 + L2*d_1;
-    // let R = R0 + R1*d_0 + R2*d_1;
-    //
-    // We group terms to reduce the number of scalar mults (to seven):
-    // In Rust, we could use MSMs for these, and speed up verification.
-    //
-    // Note, that while computing L, the intermediate computation of C_B together with computing
-    // L0, L1, L2 can be replaced by single MSM of C with the powers of q multiplied by (1 + d_0 + d_1)
-    // with additionally concatenated inputs for scalars/bases.
+    // Check: e(lhs, G2) == e(π1, [τ-α]_2) + e(π2, [σ-β]_2)  (additive GT)
+    let lhs_pairing = E::GE::pairing(&lhs, &g2_gen);
+    let rhs_pairing =
+      E::GE::pairing(&pi1_pt, &tau_minus_alpha) + E::GE::pairing(&pi2_pt, &sigma_minus_beta);
 
-    let q_power_multiplier = E::Scalar::ONE + d_0 + d_1;
-
-    let q_powers_multiplied: Vec<E::Scalar> =
-      iter::successors(Some(q_power_multiplier), |qi| Some(*qi * q))
-        .take(ell)
-        .collect();
-
-    // Compute the batched openings
-    // compute B(u_i) = v[i][0] + q*v[i][1] + ... + q^(t-1) * v[i][t-1]
-    let B_u = (0..3)
-      .into_par_iter()
-      .map(|i| {
-        pi.v
-          .iter()
-          .rev()
-          .fold(E::Scalar::ZERO, |acc, v_j| acc * q + v_j[i])
-      })
-      .collect::<Vec<E::Scalar>>();
-
-    let L = E::GE::vartime_multiscalar_mul(
-      &[
-        &q_powers_multiplied[..],
-        &[
-          u[0],
-          (u[1] * d_0),
-          (u[2] * d_1),
-          -(B_u[0] + d_0 * B_u[1] + d_1 * B_u[2]),
-        ],
-      ]
-      .concat(),
-      &[
-        &[C.comm.affine()][..],
-        &pi.com,
-        &pi.w,
-        slice::from_ref(&vk.G),
-      ]
-      .concat(),
-    );
-
-    let R0 = E::GE::group(&pi.w[0]);
-    let R1 = E::GE::group(&pi.w[1]);
-    let R2 = E::GE::group(&pi.w[2]);
-    let R = R0 + R1 * d_0 + R2 * d_1;
-
-    // Check that e(L, vk.H) == e(R, vk.tau_H)
-    if (E::GE::pairing(&L, &DlogGroup::group(&vk.H)))
-      != (E::GE::pairing(&R, &DlogGroup::group(&vk.tau_H)))
-    {
+    if lhs_pairing != rhs_pairing {
       return Err(NovaError::ProofVerifyError {
-        reason: "Pairing check failed".to_string(),
+        reason: "Bivariate KZG pairing check failed".to_string(),
       });
     }
 
@@ -1180,14 +1014,16 @@ where
   }
 }
 
+
 #[cfg(test)]
 mod tests {
   use super::*;
   use crate::{
     provider::{keccak::Keccak256Transcript, Bn256EngineBivariateKZG},
-    spartan::polys::multilinear::MultilinearPolynomial,
+    traits::TranscriptEngineTrait,
   };
-  use rand::SeedableRng;
+  use ff::Field;
+  use rand_core::OsRng;
   #[cfg(feature = "io")]
   use std::{
     fs::OpenOptions,
@@ -1197,17 +1033,42 @@ mod tests {
   type E = Bn256EngineBivariateKZG;
   type Fr = <E as Engine>::Scalar;
 
+  /// Evaluate bivariate polynomial f(X,Y) = sum_{i,j} poly[j*b+i] * X^i * Y^j at (alpha, beta).
+  fn bivariate_eval(poly: &[Fr], alpha: Fr, beta: Fr) -> Fr {
+    let n = poly.len();
+    let b = {
+      let mut b = 1usize;
+      while b * b < n {
+        b += 1;
+      }
+      b
+    };
+    let mut result = Fr::ZERO;
+    let mut beta_pow = Fr::ONE;
+    for j in 0..b {
+      let mut col_eval = Fr::ZERO;
+      let mut alpha_pow = Fr::ONE;
+      for i in 0..b {
+        col_eval += poly[j * b + i] * alpha_pow;
+        alpha_pow *= alpha;
+      }
+      result += col_eval * beta_pow;
+      beta_pow *= beta;
+    }
+    result
+  }
+
   #[test]
-  fn test_hyperkzg_eval() {
-    // Test with poly(X1, X2) = 1 + X1 + X2 + X1*X2
+  fn test_bivariate_kzg_eval() {
+    // f(X, Y) = 1 + 2*X + 3*Y + 4*X*Y  (column-major: poly[j*b+i] = f_{i,j})
+    // b=2: poly[0]=f_{0,0}=1, poly[1]=f_{1,0}=2, poly[2]=f_{0,1}=3, poly[3]=f_{1,1}=4
     let n = 4;
     let ck: CommitmentKey<E> = CommitmentEngine::setup(b"test", n).unwrap();
     let (pk, vk): (ProverKey<E>, VerifierKey<E>) = EvaluationEngine::setup(&ck).unwrap();
 
-    // poly is in eval. representation; evaluated at [(0,0), (0,1), (1,0), (1,1)]
-    let poly = vec![Fr::from(1), Fr::from(2), Fr::from(2), Fr::from(4)];
+    let poly = vec![Fr::from(1), Fr::from(2), Fr::from(3), Fr::from(4)];
 
-    let C = CommitmentEngine::commit(&ck, &poly, &<E as Engine>::Scalar::ZERO);
+    let C = CommitmentEngine::commit(&ck, &poly, &Fr::ZERO);
 
     let test_inner = |point: Vec<Fr>, eval: Fr| -> Result<(), NovaError> {
       let mut tr = Keccak256Transcript::new(b"TestEval");
@@ -1216,187 +1077,120 @@ mod tests {
       EvaluationEngine::verify(&vk, &mut tr, &C, &point, &eval, &proof)
     };
 
-    // Call the prover with a (point, eval) pair.
-    // The prover does not recompute so it may produce a proof, but it should not verify
+    // f(0,0) = 1
     let point = vec![Fr::from(0), Fr::from(0)];
-    let eval = Fr::ONE;
+    let eval = bivariate_eval(&poly, Fr::from(0), Fr::from(0));
+    assert_eq!(eval, Fr::from(1));
     assert!(test_inner(point, eval).is_ok());
 
-    let point = vec![Fr::from(0), Fr::from(1)];
-    let eval = Fr::from(2);
+    // f(1,0) = 1 + 2 = 3
+    let point = vec![Fr::from(1), Fr::from(0)];
+    let eval = bivariate_eval(&poly, Fr::from(1), Fr::from(0));
+    assert_eq!(eval, Fr::from(3));
     assert!(test_inner(point, eval).is_ok());
+
+    // f(0,1) = 1 + 3 = 4
+    let point = vec![Fr::from(0), Fr::from(1)];
+    let eval = bivariate_eval(&poly, Fr::from(0), Fr::from(1));
+    assert_eq!(eval, Fr::from(4));
+    assert!(test_inner(point, eval).is_ok());
+
+    // f(1,1) = 1 + 2 + 3 + 4 = 10
+    let point = vec![Fr::from(1), Fr::from(1)];
+    let eval = bivariate_eval(&poly, Fr::from(1), Fr::from(1));
+    assert_eq!(eval, Fr::from(10));
+    assert!(test_inner(point, eval).is_ok());
+
+    // f(2, 3) = 1 + 2*2 + 3*3 + 4*2*3 = 1 + 4 + 9 + 24 = 38
+    let point = vec![Fr::from(2), Fr::from(3)];
+    let eval = bivariate_eval(&poly, Fr::from(2), Fr::from(3));
+    assert_eq!(eval, Fr::from(38));
+    assert!(test_inner(point, eval).is_ok());
+
+    // Test with wrong eval -> verification must fail
+    let point = vec![Fr::from(2), Fr::from(3)];
+    assert!(test_inner(point, Fr::from(99)).is_err());
 
     let point = vec![Fr::from(1), Fr::from(1)];
-    let eval = Fr::from(4);
-    assert!(test_inner(point, eval).is_ok());
-
-    let point = vec![Fr::from(0), Fr::from(2)];
-    let eval = Fr::from(3);
-    assert!(test_inner(point, eval).is_ok());
-
-    let point = vec![Fr::from(2), Fr::from(2)];
-    let eval = Fr::from(9);
-    assert!(test_inner(point, eval).is_ok());
-
-    // Try a couple incorrect evaluations and expect failure
-    let point = vec![Fr::from(2), Fr::from(2)];
-    let eval = Fr::from(50);
-    assert!(test_inner(point, eval).is_err());
-
-    let point = vec![Fr::from(0), Fr::from(2)];
-    let eval = Fr::from(4);
-    assert!(test_inner(point, eval).is_err());
+    assert!(test_inner(point, Fr::from(5)).is_err());
   }
 
   #[test]
-  #[cfg(not(feature = "evm"))]
-  fn test_hyperkzg_small() {
+  fn test_bivariate_kzg_small() {
+    // f(X, Y) = 5 + 0*X + 7*Y + 0*X*Y  (b=2, column-major)
+    let poly = vec![Fr::from(5), Fr::ZERO, Fr::from(7), Fr::ZERO];
     let n = 4;
 
-    // poly = [1, 2, 1, 4]
-    let poly = vec![Fr::ONE, Fr::from(2), Fr::from(1), Fr::from(4)];
-
-    // point = [4,3]
-    let point = vec![Fr::from(4), Fr::from(3)];
-
-    // eval = 28
-    let eval = Fr::from(28);
+    // f(3, 4) = 5 + 0 + 7*4 + 0 = 33
+    let point = vec![Fr::from(3), Fr::from(4)];
+    let eval = bivariate_eval(&poly, Fr::from(3), Fr::from(4));
+    assert_eq!(eval, Fr::from(33));
 
     let ck: CommitmentKey<E> = CommitmentEngine::setup(b"test", n).unwrap();
     let (pk, vk) = EvaluationEngine::setup(&ck).unwrap();
 
-    // make a commitment
-    let C = CommitmentEngine::commit(&ck, &poly, &<E as Engine>::Scalar::ZERO);
+    let C = CommitmentEngine::commit(&ck, &poly, &Fr::ZERO);
 
-    // prove an evaluation
     let mut prover_transcript = Keccak256Transcript::new(b"TestEval");
     let proof =
       EvaluationEngine::<E>::prove(&ck, &pk, &mut prover_transcript, &C, &poly, &point, &eval)
         .unwrap();
-    let post_c_p = prover_transcript.squeeze(b"c").unwrap();
 
-    // verify the evaluation
     let mut verifier_transcript = Keccak256Transcript::new(b"TestEval");
     assert!(
       EvaluationEngine::verify(&vk, &mut verifier_transcript, &C, &point, &eval, &proof).is_ok()
     );
-    let post_c_v = verifier_transcript.squeeze(b"c").unwrap();
 
-    // check if the prover transcript and verifier transcript are kept in the same state
-    assert_eq!(post_c_p, post_c_v);
-
-    let config = bincode::config::legacy()
-      .with_big_endian()
-      .with_fixed_int_encoding();
-    let proof_bytes =
-      bincode::serde::encode_to_vec(&proof, config).expect("Failed to serialize proof");
-
-    assert_eq!(
-      proof_bytes.len(),
-      if cfg!(feature = "evm") { 464 } else { 336 }
-    );
-
-    // Change the proof and expect verification to fail
+    // Bad proof: swap pi1 and pi2
     let mut bad_proof = proof.clone();
-    let v1 = bad_proof.v[1];
-    bad_proof.v[0].clone_from(&v1);
+    let tmp = bad_proof.pi1;
+    bad_proof.pi1 = bad_proof.pi2;
+    bad_proof.pi2 = tmp;
     let mut verifier_transcript2 = Keccak256Transcript::new(b"TestEval");
-    assert!(EvaluationEngine::verify(
-      &vk,
-      &mut verifier_transcript2,
-      &C,
-      &point,
-      &eval,
-      &bad_proof
-    )
-    .is_err());
+    assert!(
+      EvaluationEngine::verify(&vk, &mut verifier_transcript2, &C, &point, &eval, &bad_proof)
+        .is_err()
+    );
   }
 
   #[test]
-  fn test_hyperkzg_large() {
-    // test the hyperkzg prover and verifier with random instances (derived from a seed)
-    for ell in [4, 5, 6] {
-      let mut rng = rand::rngs::StdRng::seed_from_u64(ell as u64);
-
-      let n = 1 << ell; // n = 2^ell
-
+  fn test_bivariate_kzg_large() {
+    // Test with random 4x4 bivariate polynomial (n=16, b=4)
+    for n in [16_usize, 64] {
+      let mut rng = OsRng;
       let poly = (0..n).map(|_| Fr::random(&mut rng)).collect::<Vec<_>>();
-      let point = (0..ell).map(|_| Fr::random(&mut rng)).collect::<Vec<_>>();
-      let eval = MultilinearPolynomial::evaluate_with(&poly, &point);
+      let alpha = Fr::random(&mut rng);
+      let beta = Fr::random(&mut rng);
+      let point = vec![alpha, beta];
+      let eval = bivariate_eval(&poly, alpha, beta);
 
       let ck: CommitmentKey<E> = CommitmentEngine::setup(b"test", n).unwrap();
       let (pk, vk) = EvaluationEngine::setup(&ck).unwrap();
 
-      // make a commitment
-      let C = CommitmentEngine::commit(&ck, &poly, &<E as Engine>::Scalar::ZERO);
+      let C = CommitmentEngine::commit(&ck, &poly, &Fr::ZERO);
 
-      // prove an evaluation
       let mut prover_transcript = Keccak256Transcript::new(b"TestEval");
       let proof: EvaluationArgument<E> =
         EvaluationEngine::prove(&ck, &pk, &mut prover_transcript, &C, &poly, &point, &eval)
           .unwrap();
 
-      // verify the evaluation
       let mut verifier_tr = Keccak256Transcript::new(b"TestEval");
-      assert!(EvaluationEngine::verify(&vk, &mut verifier_tr, &C, &point, &eval, &proof).is_ok());
-
-      // Change the proof and expect verification to fail
-      let mut bad_proof = proof.clone();
-      let v1 = bad_proof.v[1];
-      bad_proof.v[0].clone_from(&v1);
-      let mut verifier_tr2 = Keccak256Transcript::new(b"TestEval");
       assert!(
-        EvaluationEngine::verify(&vk, &mut verifier_tr2, &C, &point, &eval, &bad_proof).is_err()
+        EvaluationEngine::verify(&vk, &mut verifier_tr, &C, &point, &eval, &proof).is_ok()
       );
-    }
-  }
 
-  #[cfg(feature = "io")]
-  #[ignore = "only available with external ptau files"]
-  #[test]
-  fn test_hyperkzg_large_from_file() {
-    // test the hyperkzg prover and verifier with random instances (derived from a seed)
-    for ell in [4, 5, 6] {
-      let mut rng = rand::rngs::StdRng::seed_from_u64(ell as u64);
-
-      let n = 1 << ell; // n = 2^ell
-
-      let poly = (0..n).map(|_| Fr::random(&mut rng)).collect::<Vec<_>>();
-      let point = (0..ell).map(|_| Fr::random(&mut rng)).collect::<Vec<_>>();
-      let eval = MultilinearPolynomial::evaluate_with(&poly, &point);
-
-      let mut reader = BufReader::new(std::fs::File::open("/tmp/ppot_0080_13.ptau").unwrap());
-
-      let ck: CommitmentKey<E> = CommitmentEngine::load_setup(&mut reader, b"test", n).unwrap();
-      let (pk, vk) = EvaluationEngine::setup(&ck).unwrap();
-
-      // make a commitment
-      let C = CommitmentEngine::commit(&ck, &poly, &<E as Engine>::Scalar::ZERO);
-
-      // prove an evaluation
-      let mut prover_transcript = Keccak256Transcript::new(b"TestEval");
-      let proof: EvaluationArgument<E> =
-        EvaluationEngine::prove(&ck, &pk, &mut prover_transcript, &C, &poly, &point, &eval)
-          .unwrap();
-
-      // verify the evaluation
-      let mut verifier_tr = Keccak256Transcript::new(b"TestEval");
-      assert!(EvaluationEngine::verify(&vk, &mut verifier_tr, &C, &point, &eval, &proof).is_ok());
-
-      // Change the proof and expect verification to fail
-      let mut bad_proof = proof.clone();
-      let v1 = bad_proof.v[1];
-      bad_proof.v[0].clone_from(&v1);
+      // Wrong eval -> fail
       let mut verifier_tr2 = Keccak256Transcript::new(b"TestEval");
+      let wrong_eval = eval + Fr::ONE;
       assert!(
-        EvaluationEngine::verify(&vk, &mut verifier_tr2, &C, &point, &eval, &bad_proof).is_err()
+        EvaluationEngine::verify(&vk, &mut verifier_tr2, &C, &point, &wrong_eval, &proof).is_err()
       );
     }
   }
 
   #[test]
   fn test_key_gen() {
-    let n = 100;
+    let n = 128; // next power of 2 is 128
     let tau = Fr::random(OsRng);
     let powers_of_tau = CommitmentKey::<E>::compute_powers_serial(tau, n);
     let label = b"test";
@@ -1406,6 +1200,7 @@ mod tests {
     assert_eq!(res1.ck.len(), res2.ck.len());
     assert_eq!(res1.h, res2.h);
     assert_eq!(res1.tau_H, res2.tau_H);
+    assert_eq!(res1.sigma_H, res2.sigma_H);
     for i in 0..res1.ck.len() {
       assert_eq!(res1.ck[i], res2.ck[i]);
     }
@@ -1418,7 +1213,7 @@ mod tests {
     const LABEL: &[u8] = b"test";
 
     let n = 4;
-    let filename = "/tmp/kzg_test.ptau";
+    let filename = "/tmp/kzg_bivariate_test.ptau";
 
     let ck: CommitmentKey<E> = CommitmentEngine::setup(LABEL, n).unwrap();
 
@@ -1441,6 +1236,7 @@ mod tests {
     assert_eq!(ck.ck.len(), read_ck.ck.len());
     assert_eq!(ck.h, read_ck.h);
     assert_eq!(ck.tau_H, read_ck.tau_H);
+    assert_eq!(ck.sigma_H, read_ck.sigma_H);
     for i in 0..ck.ck.len() {
       assert_eq!(ck.ck[i], read_ck.ck[i]);
     }
