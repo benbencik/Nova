@@ -608,6 +608,8 @@ where
   pub(crate) H: G2Affine<E>,
   #[serde_as(as = "EvmCompatSerde")]
   pub(crate) tau_H: G2Affine<E>,
+  #[serde_as(as = "EvmCompatSerde")]
+  pub(crate) sigma_H: G2Affine<E>,
 }
 
 /// Provides an implementation of a polynomial evaluation argument
@@ -710,6 +712,7 @@ where
       G: E::GE::gen().affine(),
       H: <<E::GE as PairingGroup>::G2 as DlogGroup>::gen().affine(),
       tau_H: ck.tau_H,
+      sigma_H: ck.sigma_H,
     };
 
     Ok((pk, vk))
@@ -801,13 +804,42 @@ where
   /// A method to verify purported evaluations of a batch of polynomials
   fn verify(
     vk: &Self::VerifierKey,
-    transcript: &mut <E as Engine>::TE,
+    _transcript: &mut <E as Engine>::TE,
     C: &Commitment<E>,
-    x: &[E::Scalar],
-    y: &E::Scalar,
+    point: &[E::Scalar],
+    eval: &E::Scalar,
     pi: &Self::EvaluationArgument,
   ) -> Result<(), NovaError> {
-    unimplemented!("verify not yet implemented for bivariate KZG");
+    if point.len() != 2 {
+      return Err(NovaError::InvalidInputLength);
+    }
+
+    let alpha = point[0];
+    let beta = point[1];
+
+    let g1_gen = E::GE::group(&vk.G);
+    let g2_gen = <<E::GE as PairingGroup>::G2 as DlogGroup>::gen();
+
+    let tau_h = <<E::GE as PairingGroup>::G2 as DlogGroup>::group(&vk.tau_H);
+    let sigma_h = <<E::GE as PairingGroup>::G2 as DlogGroup>::group(&vk.sigma_H);
+    let tau_minus_alpha = tau_h - g2_gen * alpha;
+    let sigma_minus_beta = sigma_h - g2_gen * beta;
+
+    let pi1_pt = E::GE::group(&pi.pi1);
+    let pi2_pt = E::GE::group(&pi.pi2);
+
+    // e(C - [eval]_1, G2) == e(pi1, [tau-alpha]_2) + e(pi2, [sigma-beta]_2)
+    let lhs = C.comm - g1_gen * eval;
+    let lhs_pairing = E::GE::pairing(&lhs, &g2_gen);
+    let rhs_pairing =
+      E::GE::pairing(&pi1_pt, &tau_minus_alpha) + E::GE::pairing(&pi2_pt, &sigma_minus_beta);
+
+    if lhs_pairing != rhs_pairing {
+      return Err(NovaError::ProofVerifyError {
+        reason: "Bivariate KZG pairing check failed".to_string(),
+      });
+    }
+    Ok(())
   }
 }
 
