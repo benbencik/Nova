@@ -11,6 +11,9 @@
 //!
 //! Samaritan presents a similar construction and achieves the same performance, see <https://eprint.iacr.org/2025/419.pdf>.
 
+// for univariate batched KZG take only the first column with j = 0
+// fij mozno transpose
+
 use std::{cmp::max, marker::PhantomData};
 
 use ff::{Field, PrimeField};
@@ -171,11 +174,7 @@ impl<Scalar: PrimeField> UniPoly<Scalar> {
     }
   }
 
-  fn batch_add_with_polynomials_chopin(
-    &mut self,
-    polynomials: Vec<&[Scalar]>,
-    scalars: &[Scalar],
-  ) {
+  fn batch_add_with_polynomials_chopin(&mut self, polynomials: Vec<&[Scalar]>, scalars: &[Scalar]) {
     let rhs_max_len = polynomials.iter().map(|p| p.len()).max().unwrap();
     self.expand_chopin(max(self.coeffs.len(), rhs_max_len));
 

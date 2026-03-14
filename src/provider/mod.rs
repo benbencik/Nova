@@ -1,12 +1,12 @@
 //! This module implements Nova's traits using the following several different combinations
 
-pub mod bn256_grumpkin;
-pub mod hyperkzg;
 pub mod bivariatekzg;
+pub mod bn256_grumpkin;
+pub mod chopin;
+pub mod hyperkzg;
 pub mod ipa_pc;
 pub mod keccak;
 pub mod mercury;
-pub mod chopin;
 pub mod msm;
 pub mod pasta;
 pub mod pedersen;
