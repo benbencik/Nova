@@ -742,6 +742,8 @@ where
     let n = hat_P.len();
     let n_padded = n.next_power_of_two();
     let b = n_padded.sqrt();
+    
+    // TODO: Verify if this assumption also holds for Chopin, so far keep it
     assert_eq!(b * b, n_padded, "n must be a perfect square");
 
     // pad polynomial to n_padded if needed
@@ -851,6 +853,28 @@ fn eval_univariate<F: Field>(poly: &[F], x: F) -> F {
   acc
 }
 
+fn bivariate_eval<F: Field>(poly: &[F], x: F, y: F) -> F {
+  use num_integer::Roots;
+
+  let n = poly.len();
+  let b = n.sqrt();
+
+  let mut result = F::ZERO;
+  let mut y_pow = F::ONE;
+
+  for j in 0..b {
+    let mut row_eval = F::ZERO;
+    let mut x_pow = F::ONE;
+    for i in 0..b {
+      row_eval += poly[j * b + i] * x_pow;
+      x_pow *= x;
+    }
+    result += row_eval * y_pow;
+    y_pow *= y;
+  }
+  result
+}
+
 /// Divide polynomial by term linear term and returns the quotient
 /// p(X) = p_0 + p_1 X + ... + p_{n-1} X^{n-1}
 /// Calculate q(X) such that p(X) - p(r) = (X - r) * q(X)
@@ -871,14 +895,11 @@ mod tests {
   use super::*;
   use crate::{
     provider::{keccak::Keccak256Transcript, Bn256EngineBivariateKZG},
-    spartan::polys::multilinear::MultilinearPolynomial,
+    traits::TranscriptEngineTrait,
   };
   use rand::SeedableRng;
+use rand_core::OsRng;
   #[cfg(feature = "io")]
-  use std::{
-    fs::OpenOptions,
-    io::{BufReader, BufWriter},
-  };
 
   type E = Bn256EngineBivariateKZG;
   type Fr = <E as Engine>::Scalar;
@@ -906,16 +927,15 @@ mod tests {
 
   #[test]
   fn test_bivariate_setup_and_commit() {
-    // n = 4 means b = 2 (2x2 grid)
+    // n = 4 -> b = 2 
     let n = 4;
     let ck: CommitmentKey<E> = CommitmentEngine::setup(b"test", n).unwrap();
 
     assert_eq!(ck.length(), n);
 
-    // Simple polynomial f(X,Y) = 1 + 2X + 3Y + 4XY
-    // Layout: [f_{0,0}, f_{1,0}, f_{0,1}, f_{1,1}] = [1, 2, 3, 4]
+    // f(X,Y) = 1 + 2X + 3Y + 4XY
+    // [f_{0,0}, f_{1,0}, f_{0,1}, f_{1,1}] = [1, 2, 3, 4]
     let poly = vec![Fr::from(1), Fr::from(2), Fr::from(3), Fr::from(4)];
-
     let C = CommitmentEngine::commit(&ck, &poly, &Fr::ZERO);
 
     // Commitment should not be zero
@@ -923,15 +943,13 @@ mod tests {
   }
 
   #[test]
-  #[ignore]
-  fn test_hyperkzg_eval() {
-    // Test with poly(X1, X2) = 1 + X1 + X2 + X1*X2
+  fn test_bivariate_kzg_eval() {
+    // f(X, Y) = 1 + 2*X + 3*Y + 4*X*Y
     let n = 4;
     let ck: CommitmentKey<E> = CommitmentEngine::setup(b"test", n).unwrap();
     let (pk, vk): (ProverKey<E>, VerifierKey<E>) = EvaluationEngine::setup(&ck).unwrap();
 
-    // poly is in eval. representation; evaluated at [(0,0), (0,1), (1,0), (1,1)]
-    let poly = vec![Fr::from(1), Fr::from(2), Fr::from(2), Fr::from(4)];
+    let poly = vec![Fr::from(1), Fr::from(2), Fr::from(3), Fr::from(4)];
 
     let C = CommitmentEngine::commit(&ck, &poly, &<E as Engine>::Scalar::ZERO);
 
@@ -942,42 +960,38 @@ mod tests {
       EvaluationEngine::verify(&vk, &mut tr, &C, &point, &eval, &proof)
     };
 
-    // Call the prover with a (point, eval) pair.
-    // The prover does not recompute so it may produce a proof, but it should not verify
     let point = vec![Fr::from(0), Fr::from(0)];
     let eval = Fr::ONE;
     assert!(test_inner(point, eval).is_ok());
 
-    let point = vec![Fr::from(0), Fr::from(1)];
-    let eval = Fr::from(2);
-    assert!(test_inner(point, eval).is_ok());
-
-    let point = vec![Fr::from(1), Fr::from(1)];
-    let eval = Fr::from(4);
-    assert!(test_inner(point, eval).is_ok());
-
-    let point = vec![Fr::from(0), Fr::from(2)];
+    let point = vec![Fr::from(1), Fr::from(0)];
     let eval = Fr::from(3);
     assert!(test_inner(point, eval).is_ok());
 
-    let point = vec![Fr::from(2), Fr::from(2)];
-    let eval = Fr::from(9);
+    let point = vec![Fr::from(0), Fr::from(1)];
+    let eval = Fr::from(4);
+    assert!(test_inner(point, eval).is_ok());
+
+    let point = vec![Fr::from(1), Fr::from(1)];
+    let eval = Fr::from(10);
+    assert!(test_inner(point, eval).is_ok());
+
+    let point = vec![Fr::from(2), Fr::from(3)];
+    let eval = Fr::from(38);
     assert!(test_inner(point, eval).is_ok());
 
     // Try a couple incorrect evaluations and expect failure
-    let point = vec![Fr::from(2), Fr::from(2)];
-    let eval = Fr::from(50);
+    let point = vec![Fr::from(2), Fr::from(3)];
+    let eval = Fr::from(9);
     assert!(test_inner(point, eval).is_err());
 
-    let point = vec![Fr::from(0), Fr::from(2)];
+    let point = vec![Fr::from(1), Fr::from(1)];
     let eval = Fr::from(4);
     assert!(test_inner(point, eval).is_err());
   }
 
   #[test]
-  #[ignore]
-  #[cfg(not(feature = "evm"))]
-  fn test_hyperkzg_small() {
+  fn test_bivariate_kzg_small() {
     let n = 4;
 
     // poly = [1, 2, 1, 4]
@@ -987,7 +1001,7 @@ mod tests {
     let point = vec![Fr::from(4), Fr::from(3)];
 
     // eval = 28
-    let eval = Fr::from(28);
+    let eval = Fr::from(60);
 
     let ck: CommitmentKey<E> = CommitmentEngine::setup(b"test", n).unwrap();
     let (pk, vk) = EvaluationEngine::setup(&ck).unwrap();
@@ -1012,45 +1026,35 @@ mod tests {
     // check if the prover transcript and verifier transcript are kept in the same state
     assert_eq!(post_c_p, post_c_v);
 
-    let config = bincode::config::legacy()
-      .with_big_endian()
-      .with_fixed_int_encoding();
-    let proof_bytes =
-      bincode::serde::encode_to_vec(&proof, config).expect("Failed to serialize proof");
-
-    assert_eq!(
-      proof_bytes.len(),
-      if cfg!(feature = "evm") { 464 } else { 336 }
-    );
-
-    // // Change the proof and expect verification to fail
-    // let mut bad_proof = proof.clone();
-    // let v1 = bad_proof.v[1];
-    // bad_proof.v[0].clone_from(&v1);
-    // let mut verifier_transcript2 = Keccak256Transcript::new(b"TestEval");
-    // assert!(EvaluationEngine::verify(
-    //   &vk,
-    //   &mut verifier_transcript2,
-    //   &C,
-    //   &point,
-    //   &eval,
-    //   &bad_proof
-    // )
-    // .is_err());
+    // Change the proof and expect verification to fail
+    let mut bad_proof = proof.clone();
+    let tmp = bad_proof.pi1;
+    bad_proof.pi1 = bad_proof.pi2;
+    bad_proof.pi2 = tmp;
+    let mut verifier_transcript2 = Keccak256Transcript::new(b"TestEval");
+    assert!(EvaluationEngine::verify(
+      &vk,
+      &mut verifier_transcript2,
+      &C,
+      &point,
+      &eval,
+      &bad_proof
+    )
+    .is_err());
   }
 
   #[test]
-  #[ignore]
-  fn test_hyperkzg_large() {
+  fn test_bivariate_kzg_large() {
     // test the hyperkzg prover and verifier with random instances (derived from a seed)
-    for ell in [4, 5, 6] {
-      let mut rng = rand::rngs::StdRng::seed_from_u64(ell as u64);
-
+    for ell in [4, 6, 8] {
+      let mut rng = rand::rngs::StdRng::seed_from_u64(ell);
       let n = 1 << ell; // n = 2^ell
 
       let poly = (0..n).map(|_| Fr::random(&mut rng)).collect::<Vec<_>>();
-      let point = (0..ell).map(|_| Fr::random(&mut rng)).collect::<Vec<_>>();
-      let eval = MultilinearPolynomial::evaluate_with(&poly, &point);
+      let alpha = Fr::random(&mut rng);
+      let beta = Fr::random(&mut rng);
+      let point = vec![alpha, beta];
+      let eval = bivariate_eval(&poly, alpha, beta);
 
       let ck: CommitmentKey<E> = CommitmentEngine::setup(b"test", n).unwrap();
       let (pk, vk) = EvaluationEngine::setup(&ck).unwrap();
@@ -1068,126 +1072,15 @@ mod tests {
       let mut verifier_tr = Keccak256Transcript::new(b"TestEval");
       assert!(EvaluationEngine::verify(&vk, &mut verifier_tr, &C, &point, &eval, &proof).is_ok());
 
-      // // Change the proof and expect verification to fail
-      // let mut bad_proof = proof.clone();
-      // let v1 = bad_proof.v[1];
-      // bad_proof.v[0].clone_from(&v1);
-      // let mut verifier_tr2 = Keccak256Transcript::new(b"TestEval");
-      // assert!(
-      //   EvaluationEngine::verify(&vk, &mut verifier_tr2, &C, &point, &eval, &bad_proof).is_err()
-      // );
-    }
-  }
-
-  #[cfg(feature = "io")]
-  #[ignore = "only available with external ptau files"]
-  #[test]
-  fn test_hyperkzg_large_from_file() {
-    // test the hyperkzg prover and verifier with random instances (derived from a seed)
-    for ell in [4, 5, 6] {
-      let mut rng = rand::rngs::StdRng::seed_from_u64(ell as u64);
-
-      let n = 1 << ell; // n = 2^ell
-
-      let poly = (0..n).map(|_| Fr::random(&mut rng)).collect::<Vec<_>>();
-      let point = (0..ell).map(|_| Fr::random(&mut rng)).collect::<Vec<_>>();
-      let eval = MultilinearPolynomial::evaluate_with(&poly, &point);
-
-      let mut reader = BufReader::new(std::fs::File::open("/tmp/ppot_0080_13.ptau").unwrap());
-
-      let ck: CommitmentKey<E> = CommitmentEngine::load_setup(&mut reader, b"test", n).unwrap();
-      let (pk, vk) = EvaluationEngine::setup(&ck).unwrap();
-
-      // make a commitment
-      let C = CommitmentEngine::commit(&ck, &poly, &<E as Engine>::Scalar::ZERO);
-
-      // prove an evaluation
-      let mut prover_transcript = Keccak256Transcript::new(b"TestEval");
-      let proof: EvaluationArgument<E> =
-        EvaluationEngine::prove(&ck, &pk, &mut prover_transcript, &C, &poly, &point, &eval)
-          .unwrap();
-
-      // verify the evaluation
-      let mut verifier_tr = Keccak256Transcript::new(b"TestEval");
-      assert!(EvaluationEngine::verify(&vk, &mut verifier_tr, &C, &point, &eval, &proof).is_ok());
-
-      // // Change the proof and expect verification to fail
-      // let mut bad_proof = proof.clone();
-      // let v1 = bad_proof.v[1];
-      // bad_proof.v[0].clone_from(&v1);
-      // let mut verifier_tr2 = Keccak256Transcript::new(b"TestEval");
-      // assert!(
-      //   EvaluationEngine::verify(&vk, &mut verifier_tr2, &C, &point, &eval, &bad_proof).is_err()
-      // );
-    }
-  }
-
-  #[test]
-  #[ignore]
-  fn test_key_gen() {
-    // TODO: add checks for setup
-  }
-
-  #[cfg(feature = "io")]
-  #[test]
-  #[ignore]
-  fn test_save_load_ck() {
-    const BUFFER_SIZE: usize = 64 * 1024;
-    const LABEL: &[u8] = b"test";
-
-    let n = 4;
-    let filename = "/tmp/kzg_test.ptau";
-
-    let ck: CommitmentKey<E> = CommitmentEngine::setup(LABEL, n).unwrap();
-
-    let file = OpenOptions::new()
-      .write(true)
-      .create(true)
-      .truncate(true)
-      .open(filename)
-      .unwrap();
-    let mut writer = BufWriter::with_capacity(BUFFER_SIZE, file);
-
-    CommitmentEngine::save_setup(&ck, &mut writer).unwrap();
-
-    let file = OpenOptions::new().read(true).open(filename).unwrap();
-
-    let mut reader = BufReader::new(file);
-
-    let read_ck = CommitmentEngine::<E>::load_setup(&mut reader, LABEL, ck.ck.len()).unwrap();
-
-    assert_eq!(ck.ck.len(), read_ck.ck.len());
-    assert_eq!(ck.h, read_ck.h);
-    assert_eq!(ck.tau_H, read_ck.tau_H);
-    for i in 0..ck.ck.len() {
-      assert_eq!(ck.ck[i], read_ck.ck[i]);
-    }
-  }
-
-  #[cfg(feature = "io")]
-  #[ignore = "only available with external ptau files"]
-  #[test]
-  fn test_load_ptau() {
-    let filename = "/tmp/ppot_0080_13.ptau";
-    let file = OpenOptions::new().read(true).open(filename).unwrap();
-
-    let mut reader = BufReader::new(file);
-
-    let ck = CommitmentEngine::<E>::load_setup(&mut reader, b"test", 1).unwrap();
-
-    let mut rng = rand::thread_rng();
-
-    let gen_g1 = ck.ck[0];
-    let t_g2 = ck.tau_H;
-
-    for _ in 0..1000 {
-      let x = Fr::from(<rand::rngs::ThreadRng as rand::Rng>::gen::<u64>(&mut rng));
-      let x = x * x * x * x;
-
-      let left = halo2curves::bn256::G1::pairing(&(gen_g1 * x), &t_g2.into());
-      let right = halo2curves::bn256::G1::pairing(&gen_g1.into(), &t_g2.into()) * x;
-
-      assert_eq!(left, right);
+      // Change the proof and expect verification to fail
+      let mut bad_proof = proof.clone();
+      let tmp = bad_proof.pi1;
+      bad_proof.pi1 = bad_proof.pi2;
+      bad_proof.pi2 = tmp;
+      let mut verifier_tr2 = Keccak256Transcript::new(b"TestEval");
+      assert!(
+        EvaluationEngine::verify(&vk, &mut verifier_tr2, &C, &point, &eval, &bad_proof).is_err()
+      );
     }
   }
 }
