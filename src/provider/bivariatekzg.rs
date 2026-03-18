@@ -1,3 +1,4 @@
+// TODO: Rewrite this
 //! This module implements Nova's evaluation engine using `HyperKZG`, a KZG-based polynomial commitment for multilinear polynomials
 //! HyperKZG is based on the transformation from univariate PCS to multilinear PCS in the Gemini paper (section 2.4.2 in <https://eprint.iacr.org/2022/420.pdf>).
 //! However, there are some key differences:
@@ -7,7 +8,7 @@
 //! and within the KZG commitment scheme implementation itself).
 #![allow(non_snake_case)]
 #[cfg(feature = "io")]
-use crate::provider::{ptau::PtauFileError, read_ptau, write_ptau};
+use crate::provider::ptau::PtauFileError;
 use crate::{
   errors::NovaError,
   gadgets::utils::to_bignat_repr,
@@ -24,11 +25,9 @@ use crate::{
   },
 };
 use core::{
-  iter,
   marker::PhantomData,
   ops::Range,
   ops::{Add, Mul, MulAssign},
-  slice,
 };
 use ff::Field;
 #[cfg(any(test, feature = "test-utils"))]
@@ -94,6 +93,17 @@ where
   /// Returns a reference to the tau_H field
   pub fn tau_H(&self) -> &<<E::GE as PairingGroup>::G2 as DlogGroup>::AffineGroupElement {
     &self.tau_H
+  }
+
+  /// Returns a reference to the sigma_H field
+  pub fn sigma_H(&self) -> &<<E::GE as PairingGroup>::G2 as DlogGroup>::AffineGroupElement {
+    &self.sigma_H
+  }
+
+  /// Returns a slice of SRS: tau^0*sigma^0, tau^1*sigma^0, ..., tau^{b-1}*sigma^0
+  /// used for all univariate KZG commitments
+  pub(crate) fn uni_commit_key(&self, b: usize) -> &[<E::GE as DlogGroup>::AffineGroupElement] {
+    &self.ck[..b]
   }
 
   /// Returns the coordinates of the generator points.
@@ -359,10 +369,6 @@ where
     Self::setup_from_tau_sigma_direct(label, &powers_of_tau, &powers_of_sigma, tau, sigma)
   }
 
-  fn setup_from_tau_fixed_base_exp(label: &'static [u8], powers_of_tau: &[E::Scalar]) -> Self {
-    !unimplemented!("use direct version");
-  }
-
   /// Build key from independent powers of tau and sigma
   /// Produces ck of size b^2 with column-major layout:
   /// ck[j*b + i] = G1 * (tau^i * sigma^j)
@@ -408,7 +414,7 @@ where
     powers_of_tau
   }
 
-  fn compute_powers_par(tau: E::Scalar, n: usize) -> Vec<E::Scalar> {
+  fn compute_powers_par(_tau: E::Scalar, _n: usize) -> Vec<E::Scalar> {
     !unimplemented!("use just serial version, setup is not included in benchmarks");
   }
 }
@@ -475,14 +481,6 @@ where
     }
   }
 
-  fn batch_commit(
-    ck: &Self::CommitmentKey,
-    v: &[Vec<<E as Engine>::Scalar>],
-    r: &[<E as Engine>::Scalar],
-  ) -> Vec<Self::Commitment> {
-    !unimplemented!("batch commit for bivariate KZG not needed in chopin")
-  }
-
   fn commit_small<T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
     ck: &Self::CommitmentKey,
     v: &[T],
@@ -493,14 +491,6 @@ where
       comm: E::GE::vartime_multiscalar_mul_small(v, &ck.ck[..v.len()])
         + <E::GE as DlogGroup>::group(&ck.h) * r,
     }
-  }
-
-  fn batch_commit_small<T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
-    ck: &Self::CommitmentKey,
-    v: &[Vec<T>],
-    r: &[E::Scalar],
-  ) -> Vec<Self::Commitment> {
-    !unimplemented!("batch commit for bivariate KZG not needed in chopin")
   }
 
   fn derandomize(
@@ -525,8 +515,8 @@ where
   /// Save keys
   #[cfg(feature = "io")]
   fn save_setup(
-    ck: &Self::CommitmentKey,
-    mut writer: &mut (impl std::io::Write + std::io::Seek),
+    _ck: &Self::CommitmentKey,
+    mut _writer: &mut (impl std::io::Write + std::io::Seek),
   ) -> Result<(), PtauFileError> {
     !unimplemented!("saving to files not needed for benches");
   }
@@ -592,6 +582,12 @@ where
 #[serde(bound = "")]
 pub struct ProverKey<E: Engine> {
   _p: PhantomData<E>,
+}
+
+impl<E: Engine> Default for ProverKey<E> {
+  fn default() -> Self {
+    Self { _p: PhantomData }
+  }
 }
 
 /// A verifier key
@@ -742,7 +738,7 @@ where
     let n = hat_P.len();
     let n_padded = n.next_power_of_two();
     let b = n_padded.sqrt();
-    
+
     // TODO: Verify if this assumption also holds for Chopin, so far keep it
     assert_eq!(b * b, n_padded, "n must be a perfect square");
 
@@ -879,7 +875,7 @@ fn bivariate_eval<F: Field>(poly: &[F], x: F, y: F) -> F {
 /// p(X) = p_0 + p_1 X + ... + p_{n-1} X^{n-1}
 /// Calculate q(X) such that p(X) - p(r) = (X - r) * q(X)
 /// q(X) has degree n-2 when p(X) has degree n-1.
-fn divide_by_linear<F: Field>(p: &[F], r: F) -> Vec<F> {
+pub(crate) fn divide_by_linear<F: Field>(p: &[F], r: F) -> Vec<F> {
   let n: usize = p.len();
 
   let mut q = vec![F::ZERO; n - 1];
@@ -898,7 +894,6 @@ mod tests {
     traits::TranscriptEngineTrait,
   };
   use rand::SeedableRng;
-use rand_core::OsRng;
   #[cfg(feature = "io")]
 
   type E = Bn256EngineBivariateKZG;
@@ -927,7 +922,7 @@ use rand_core::OsRng;
 
   #[test]
   fn test_bivariate_setup_and_commit() {
-    // n = 4 -> b = 2 
+    // n = 4 -> b = 2
     let n = 4;
     let ck: CommitmentKey<E> = CommitmentEngine::setup(b"test", n).unwrap();
 
