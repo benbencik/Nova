@@ -628,6 +628,11 @@ impl<E: Engine> EvaluationArgument<E>
 where
   E::GE: PairingGroup,
 {
+  /// Create an evaluation argument from the two quotient commitments.
+  pub fn new(pi1: G1Affine<E>, pi2: G1Affine<E>) -> Self {
+    Self { pi1, pi2 }
+  }
+
   /// returns the pi1 proof
   pub fn pi1(&self) -> &G1Affine<E> {
     &self.pi1

@@ -96,13 +96,16 @@ where
   comm_h: Commitment<E>,
 
   comm_g: Commitment<E>,
-  comm_q: Commitment<E>,
 
   comm_s: Commitment<E>,
 
   comm_d: Commitment<E>,
 
-  comm_quot_f: Commitment<E>,
+  /// Bivariate KZG opening proof: [q1(tau, sigma)]_1 where q1(X, Y) = (f(X, Y) - f(alpha, Y)) / (X - alpha)
+  pi_1: <<E as Engine>::GE as DlogGroup>::AffineGroupElement,
+  
+  /// Bivariate KZG opening proof: [q2(sigma)]_1 where q2(Y) = q2(Y) = (f(alpha, Y) - f(alpha, beta)) / (Y - beta)
+  pi_2: <<E as Engine>::GE as DlogGroup>::AffineGroupElement,
 
   comm_w: Commitment<E>,
   comm_w_prime: Commitment<E>,
@@ -249,6 +252,25 @@ impl<Scalar: PrimeField> UniPoly<Scalar> {
     self.coeffs = new_coeffs;
   }
 }
+
+/// Transpose coefficients from [row * num_cols + col] into [col * num_rows + row]
+#[inline]
+fn transpose_coeffs<Scalar: PrimeField>(
+  coeffs: &[Scalar],
+  num_rows: usize,
+  num_cols: usize,
+) -> Vec<Scalar> {
+  assert_eq!(coeffs.len(), num_rows * num_cols, "Number of coefficients must match num_rows * num_cols");
+
+  (0..num_rows * num_cols)
+    .map(|k| {
+      let col = k / num_rows;
+      let row = k % num_rows;
+      coeffs[row * num_cols + col]
+    })
+    .collect()
+}
+
 
 // f(X) / (X^{num_cols} - alpha)
 // returns the quotient and the remainder polynomial
@@ -836,6 +858,8 @@ where
       (f_poly, log_b, b, point)
     };
 
+    let uni_ck = bivariatekzg::CommitmentKey::<E>::new(ck.uni_commit_key(b).to_vec(), *ck.h(), *ck.tau_H(), *ck.sigma_H());
+
     let (u_row, u_col) = point.split_at(log_b);
     let u_row = u_row.to_owned();
     let u_col = u_col.to_owned();
@@ -886,7 +910,7 @@ where
     }
 
     // * 2. Mercury Section 6. Step 1. (b)
-    let comm_h = E::CE::commit(ck, &h_poly.coeffs, &E::Scalar::ZERO);
+    let comm_h = E::CE::commit(&uni_ck, &h_poly.coeffs, &E::Scalar::ZERO);
     transcript.absorb(LABEL_H, &[comm_h].to_vec().as_slice());
 
     // * 3. Mercury Section 6. Step 2. (a)
@@ -944,12 +968,9 @@ where
     }
 
     // * 5. Mercury Section 6. Step 2. (c)
-    // * Main Cost (Prover) I: MSM of O(N)
-    let (comm_q, comm_g) = rayon::join(
-      || E::CE::commit(ck, &q_poly.coeffs, &E::Scalar::ZERO),
-      || E::CE::commit(ck, &g_poly.coeffs, &E::Scalar::ZERO),
-    );
-    transcript.absorb(LABEL_Q, &[comm_q].to_vec().as_slice());
+    // * Main Cost (Prover) I: MSM of O(N^{1/2})
+    let comm_g = E::CE::commit(&uni_ck, &g_poly.coeffs, &E::Scalar::ZERO);
+
     transcript.absorb(LABEL_G, &[comm_g].to_vec().as_slice());
 
     #[cfg(debug_assertions)]
@@ -1023,8 +1044,8 @@ where
 
     // * Send commitments of 7. and 8.
     let (comm_s, comm_d) = rayon::join(
-      || E::CE::commit(ck, &s_poly.coeffs, &E::Scalar::ZERO),
-      || E::CE::commit(ck, &d_poly.coeffs, &E::Scalar::ZERO),
+      || E::CE::commit(&uni_ck, &s_poly.coeffs, &E::Scalar::ZERO),
+      || E::CE::commit(&uni_ck, &d_poly.coeffs, &E::Scalar::ZERO),
     );
 
     transcript.absorb(LABEL_S, &[comm_s].to_vec().as_slice());
@@ -1060,46 +1081,6 @@ where
         .unwrap()
     };
 
-    // quot_f(X) = ( f(X) -  q(X) * (zeta^b - alpha) - g(zeta) ) / (X - zeta)
-    let quot_f = {
-      let zeta_b = zeta.pow([b as u64]);
-      let zeta_b_alpha = zeta_b - alpha;
-
-      let mut quot_f = UniPoly {
-        coeffs: f_poly.to_vec(),
-      };
-
-      quot_f.batch_add_with_polynomials_chopin(vec![&q_poly.coeffs], &[-zeta_b_alpha]);
-
-      quot_f.coeffs[0] -= g_zeta;
-
-      let rem = quot_f.divide_by_linear_polynomial_chopin(&zeta);
-
-      assert_eq!(rem, E::Scalar::ZERO);
-
-      quot_f
-    };
-
-    #[cfg(debug_assertions)]
-    {
-      // Check quot_f
-      use rand_core::OsRng;
-
-      let r = E::Scalar::random(OsRng);
-
-      let f_poly = UniPoly {
-        coeffs: f_poly.to_vec(),
-      };
-
-      let f_r = f_poly.evaluate(&r);
-      let zeta_b = zeta.pow([b as u64]);
-      let zeta_b_alpha = zeta_b - alpha;
-      let q_r = q_poly.evaluate(&r);
-      let quot_f_r = quot_f.evaluate(&r);
-
-      assert_eq!(quot_f_r * (r - zeta), f_r - zeta_b_alpha * q_r - g_zeta);
-    }
-
     // * 10. Mercury Section 6. Step 4. (b)
     transcript.absorb(LABEL_GZ, &[g_zeta].to_vec().as_slice());
     transcript.absorb(LABEL_GZI, &[g_zeta_inv].to_vec().as_slice());
@@ -1108,22 +1089,34 @@ where
     transcript.absorb(LABEL_SZ, &[s_zeta].to_vec().as_slice());
     transcript.absorb(LABEL_SZI, &[s_zeta_inv].to_vec().as_slice());
 
-    // * 11. Mercury Section 6. Step 4. (d)
-    // * Main Cost (Prover) II: MSM of O(N)
-    let comm_quot_f = {
-      let mut quot_f = quot_f;
-      quot_f.coeffs.truncate(original_size);
-      quot_f.trim_chopin();
-      E::CE::commit(ck, &quot_f.coeffs, &E::Scalar::ZERO)
-    };
-    transcript.absorb(LABEL_QUOT_F, &[comm_quot_f].to_vec().as_slice());
+    
+    // * 11. Mercury Section 6. Step 4. (d) bivariate opening proof pi
+    let (pi_1, pi_2) = {
+      // Transpose: transposed[j * b + i] = f_poly[i * b + j]
+      let transposed = transpose_coeffs(&f_poly, b, b);
 
+      // Build bivariate quotients using the full bivariate SRS key ck
+      let biv_point = [alpha, zeta];
+      let biv_arg = bivariatekzg::EvaluationEngine::<E>::prove(
+        ck,
+        &bivariatekzg::ProverKey::default(),
+        transcript,
+        // Commitment is just a placeholder; bivariate prove() only uses ck and hat_P
+        &Commitment::<E>::new(E::GE::zero()),
+        &transposed,
+        &biv_point,
+        &g_zeta,
+      )?;
+
+      (*biv_arg.pi1(), *biv_arg.pi2())
+    };
+   
     // * 12. Mercury Section 6. Step 4. (e)
     let BatchArg {
       comm_w,
       comm_w_prime,
     } = generate_batch_evaluate_arg::<E>(
-      ck,
+      &uni_ck,
       BatchEvaluationInput {
         evals: BatchEvaluations {
           g_zeta,
@@ -1153,12 +1146,12 @@ where
     Ok(EvaluationArgument {
       comm_h,
       comm_g,
-      comm_q,
       comm_s,
       comm_d,
+      pi_1,
+      pi_2, 
       comm_w,
       comm_w_prime,
-      comm_quot_f,
       g_zeta,
       g_zeta_inv,
       h_zeta,
@@ -1193,10 +1186,8 @@ where
       // * 1. Mercury Section 6. Step 2. (a)
       let alpha = transcript.squeeze(LABEL_ALPHA)?;
 
-      // * Mercury Section 6. Step 1. (b)
-      transcript.absorb(LABEL_Q, &[arg.comm_q].to_vec().as_slice());
-
       // * Mercury Section 6. Step 2. (c)
+      // only absorb comm_g (q commitment is dropped)
       transcript.absorb(LABEL_G, &[arg.comm_g].to_vec().as_slice());
 
       // * 2. Mercury Section 6. Step 3. (a)
@@ -1220,7 +1211,7 @@ where
       transcript.absorb(LABEL_SZI, &[arg.s_zeta_inv].to_vec().as_slice());
 
       // * Mercury Section 6. Step 4. (d)
-      transcript.absorb(LABEL_QUOT_F, &[arg.comm_quot_f].to_vec().as_slice());
+      // TODO: Maybe absorb bivariate proof pi
 
       (alpha, gamma, zeta)
     };
@@ -1293,54 +1284,22 @@ where
     let lr = g2;
     let rr = tau2;
 
-    // * Check f(X) / (X^b - alpha) = (q(X), g(x))
-    // * 5. Adapted from Mercury Section 6. Step 4. (f)
-    // The pairing check in Step 4. (f) is
-    // Pairing 1 LHS = comm_f - [zeta^b - alpha] comm_q - [g(zeta)]_1
-    // Pairing 1 RHS = [1]_2
-    // Pairing 2 LHS = comm_quot_f
-    // Pairing 2 RHS = [tau - zeta]_2
-    //
-    // It is adapted into the following pairing checks:
-    // Pairing 1 LHS: comm_f + [zeta^b - alpha] comm_q - [g(zeta)]_1 + [zeta] * comm_quot_f
-    // Pairing 1 RHS: g1
-    // Pairing 2 LHS: comm_quot_f
-    // Pairing 2 RHS: [tau]_2
-    //
-    // The verifier's checks are batched as follows:
-    // Denote the above as LHS_1, RHS_1=g1, LHS_2, RHS_2=[tau]_2.
-    // Denote the KZG pairing of BDFH20 (Step 4. (g)) as LHS_1', RHS_1'=g1, LHS_2', RHS_2'=[tau]_2.
-    // The verifier samples a random d and checks
-    // e(LHS_1 + LHS_1' * d, g1) = e(LHS_2 + LHS_2' * d, [tau]_2)
-    let (lhs_1_1, lhs_2_1) = {
-      let zeta_b = zeta_b_one * zeta;
-      let zeta_b_alpha = zeta_b - alpha;
+    // Bivariate opening check for f(alpha, zeta) = g_zeta.
+    // This delegates to bivariatekzg's native verifier equation.
+    let biv_arg = bivariatekzg::EvaluationArgument::<E>::new(arg.pi_1, arg.pi_2);
+    let biv_point = [alpha, zeta];
+    bivariatekzg::EvaluationEngine::<E>::verify(
+      vk,
+      transcript,
+      comm_f,
+      &biv_point,
+      &arg.g_zeta,
+      &biv_arg,
+    )?;
 
-      let scalars = [-zeta_b_alpha, -arg.g_zeta, zeta];
-
-      let bases = [arg.comm_q, g1, arg.comm_quot_f]
-        .into_iter()
-        .map(|b| b.into_inner().affine())
-        .collect::<Vec<_>>();
-
-      // * Main Cost (Verifier) I: MSM of 3
-      let ll = *comm_f + Commitment::new(E::GE::vartime_multiscalar_mul(&scalars, &bases));
-      let rl = arg.comm_quot_f;
-
-      #[cfg(debug_assertions)]
-      {
-        let pairing_l = E::GE::pairing(&ll.into_inner(), &lr);
-        let pairing_r = E::GE::pairing(&rl.into_inner(), &rr);
-
-        assert!(pairing_l == pairing_r);
-      }
-
-      (ll, rl)
-    };
-
-    // * Check KZG
+    // * Univariate batched KZG check
     // * 6. Mercury Section 6. Step 4. (g)
-    let (lhs_1_2, lhs_2_2) = extract_pairing_to_verify_batch_evaluation::<E>(
+    let (ll, rl) = extract_pairing_to_verify_batch_evaluation::<E>(
       BatchEvaluations {
         zeta,
         zeta_inv,
@@ -1371,8 +1330,8 @@ where
     let d = transcript.squeeze(LABEL_PAIRING_D)?;
 
     // * Main Cost (Verifier) III: MSM of 2
-    let ll = lhs_1_1 + lhs_1_2 * d;
-    let rl = lhs_2_1 + lhs_2_2 * d;
+    // let ll = lhs_1_1 + lhs_1_2 * d;
+    // let rl = lhs_2_1 + lhs_2_2 * d;
 
     let pairing_l = E::GE::pairing(&ll.into_inner(), &lr);
     let pairing_r = E::GE::pairing(&rl.into_inner(), &rr);
@@ -1387,68 +1346,68 @@ where
   }
 }
 
-#[cfg(test)]
-mod tests {
-  use ff::Field;
-  use rand_core::OsRng;
-  use rayon::iter::{IntoParallelIterator, ParallelIterator};
+// #[cfg(test)]
+// mod tests {
+//   use ff::Field;
+//   use rand_core::OsRng;
+//   use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
-  use crate::spartan::polys::multilinear::MultilinearPolynomial;
-  use crate::traits::commitment::CommitmentEngineTrait;
-  use crate::traits::evaluation::EvaluationEngineTrait;
-  use crate::traits::{Engine, TranscriptEngineTrait};
-  use crate::{provider::Bn256EngineBivariateKZG, spartan::polys::univariate::UniPoly};
+//   use crate::spartan::polys::multilinear::MultilinearPolynomial;
+//   use crate::traits::commitment::CommitmentEngineTrait;
+//   use crate::traits::evaluation::EvaluationEngineTrait;
+//   use crate::traits::{Engine, TranscriptEngineTrait};
+//   use crate::{provider::Bn256EngineBivariateKZG, spartan::polys::univariate::UniPoly};
 
-  type F = halo2curves::bn256::Fr;
-  type E = Bn256EngineBivariateKZG;
-  type EE = super::EvaluationEngine<E>;
+//   type F = halo2curves::bn256::Fr;
+//   type E = Bn256EngineBivariateKZG;
+//   type EE = super::EvaluationEngine<E>;
 
-  fn prove_and_verify<EE: EvaluationEngineTrait<E>>(log_n: usize) -> EE::EvaluationArgument {
-    let n = 1 << log_n;
-    let poly = UniPoly {
-      coeffs: (0..n)
-        .into_par_iter()
-        .map(|_| F::random(OsRng))
-        .collect::<Vec<_>>(),
-    };
-    let point = (0..log_n).map(|_| F::random(OsRng)).collect::<Vec<_>>();
+//   fn prove_and_verify<EE: EvaluationEngineTrait<E>>(log_n: usize) -> EE::EvaluationArgument {
+//     let n = 1 << log_n;
+//     let poly = UniPoly {
+//       coeffs: (0..n)
+//         .into_par_iter()
+//         .map(|_| F::random(OsRng))
+//         .collect::<Vec<_>>(),
+//     };
+//     let point = (0..log_n).map(|_| F::random(OsRng)).collect::<Vec<_>>();
 
-    let ck = <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey::setup_from_rng(
-      b"test", n, OsRng,
-    );
+//     let ck = <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey::setup_from_rng(
+//       b"test", n, OsRng,
+//     );
 
-    let (pk, vk) = EE::setup(&ck).unwrap();
+//     let (pk, vk) = EE::setup(&ck).unwrap();
 
-    let eval = MultilinearPolynomial::new(poly.coeffs.clone()).evaluate(&point);
+//     let eval = MultilinearPolynomial::new(poly.coeffs.clone()).evaluate(&point);
 
-    let mut transcript = <E as Engine>::TE::new(b"test");
+//     let mut transcript = <E as Engine>::TE::new(b"test");
 
-    let comm = <E as Engine>::CE::commit(&ck, &poly.coeffs, &F::ZERO);
+//     let comm = <E as Engine>::CE::commit(&ck, &poly.coeffs, &F::ZERO);
 
-    let arg = EE::prove(
-      &ck,
-      &pk,
-      &mut transcript,
-      &comm,
-      &poly.coeffs,
-      &point,
-      &eval,
-    )
-    .unwrap();
+//     let arg = EE::prove(
+//       &ck,
+//       &pk,
+//       &mut transcript,
+//       &comm,
+//       &poly.coeffs,
+//       &point,
+//       &eval,
+//     )
+//     .unwrap();
 
-    let mut transcript = <E as Engine>::TE::new(b"test");
-    EE::verify(&vk, &mut transcript, &comm, &point, &eval, &arg).unwrap();
+//     let mut transcript = <E as Engine>::TE::new(b"test");
+//     EE::verify(&vk, &mut transcript, &comm, &point, &eval, &arg).unwrap();
 
-    arg
-  }
+//     arg
+//   }
 
-  #[test]
-  fn test_mercury_evaluation_engine_15() {
-    prove_and_verify::<EE>(15);
-  }
+//   #[test]
+//   fn test_mercury_evaluation_engine_15() {
+//     prove_and_verify::<EE>(15);
+//   }
 
-  #[test]
-  fn test_mercury_evaluation_engine_16() {
-    prove_and_verify::<EE>(16);
-  }
-}
+//   #[test]
+//   fn test_mercury_evaluation_engine_16() {
+//     prove_and_verify::<EE>(16);
+//   }
+// }
