@@ -27,7 +27,6 @@ use serde_with::serde_as;
 
 use crate::traits::evm_serde::EvmCompatSerde;
 
-use crate::provider::traits::DlogGroupExt;
 use crate::{
   errors::NovaError,
   provider::{
@@ -50,11 +49,9 @@ mod transcript_labels {
   pub const LABEL_U: &[u8] = b"u";
   pub const LABEL_E: &[u8] = b"e";
   pub const LABEL_H: &[u8] = b"h";
-  pub const LABEL_Q: &[u8] = b"q";
   pub const LABEL_G: &[u8] = b"g";
   pub const LABEL_S: &[u8] = b"s";
   pub const LABEL_D: &[u8] = b"d";
-  pub const LABEL_QUOT_F: &[u8] = b"t";
   pub const LABEL_GZ: &[u8] = b"gz";
   pub const LABEL_GZI: &[u8] = b"gzi";
   pub const LABEL_HZ: &[u8] = b"hz";
@@ -101,11 +98,12 @@ where
 
   comm_d: Commitment<E>,
 
+  ///!This is public just so that it is accessible in the tests  
   /// Bivariate KZG opening proof: [q1(tau, sigma)]_1 where q1(X, Y) = (f(X, Y) - f(alpha, Y)) / (X - alpha)
-  pi_1: <<E as Engine>::GE as DlogGroup>::AffineGroupElement,
-  
+  pub pi_1: <<E as Engine>::GE as DlogGroup>::AffineGroupElement,
+
   /// Bivariate KZG opening proof: [q2(sigma)]_1 where q2(Y) = q2(Y) = (f(alpha, Y) - f(alpha, beta)) / (Y - beta)
-  pi_2: <<E as Engine>::GE as DlogGroup>::AffineGroupElement,
+  pub pi_2: <<E as Engine>::GE as DlogGroup>::AffineGroupElement,
 
   comm_w: Commitment<E>,
   comm_w_prime: Commitment<E>,
@@ -260,7 +258,11 @@ fn transpose_coeffs<Scalar: PrimeField>(
   num_rows: usize,
   num_cols: usize,
 ) -> Vec<Scalar> {
-  assert_eq!(coeffs.len(), num_rows * num_cols, "Number of coefficients must match num_rows * num_cols");
+  assert_eq!(
+    coeffs.len(),
+    num_rows * num_cols,
+    "Number of coefficients must match num_rows * num_cols"
+  );
 
   (0..num_rows * num_cols)
     .map(|k| {
@@ -270,7 +272,6 @@ fn transpose_coeffs<Scalar: PrimeField>(
     })
     .collect()
 }
-
 
 // f(X) / (X^{num_cols} - alpha)
 // returns the quotient and the remainder polynomial
@@ -837,8 +838,6 @@ where
     transcript.absorb(LABEL_U, &point.to_vec().as_slice());
     transcript.absorb(LABEL_E, &[*eval].to_vec().as_slice());
 
-    let original_size = poly.len();
-
     let (f_poly, log_b, b, point) = {
       let mut log_n = point.len();
 
@@ -858,7 +857,12 @@ where
       (f_poly, log_b, b, point)
     };
 
-    let uni_ck = bivariatekzg::CommitmentKey::<E>::new(ck.uni_commit_key(b).to_vec(), *ck.h(), *ck.tau_H(), *ck.sigma_H());
+    let uni_ck = bivariatekzg::CommitmentKey::<E>::new(
+      ck.uni_commit_key(b).to_vec(),
+      *ck.h(),
+      *ck.tau_H(),
+      *ck.sigma_H(),
+    );
 
     let (u_row, u_col) = point.split_at(log_b);
     let u_row = u_row.to_owned();
@@ -1089,7 +1093,6 @@ where
     transcript.absorb(LABEL_SZ, &[s_zeta].to_vec().as_slice());
     transcript.absorb(LABEL_SZI, &[s_zeta_inv].to_vec().as_slice());
 
-    
     // * 11. Mercury Section 6. Step 4. (d) bivariate opening proof pi
     let (pi_1, pi_2) = {
       // Transpose: transposed[j * b + i] = f_poly[i * b + j]
@@ -1110,7 +1113,7 @@ where
 
       (*biv_arg.pi1(), *biv_arg.pi2())
     };
-   
+
     // * 12. Mercury Section 6. Step 4. (e)
     let BatchArg {
       comm_w,
@@ -1149,7 +1152,7 @@ where
       comm_s,
       comm_d,
       pi_1,
-      pi_2, 
+      pi_2,
       comm_w,
       comm_w_prime,
       g_zeta,
@@ -1327,7 +1330,8 @@ where
 
     // Check Pairing of 3. and 4.
     transcript.absorb(LABEL_W_PRIME, &[arg.comm_w_prime].to_vec().as_slice());
-    let d = transcript.squeeze(LABEL_PAIRING_D)?;
+    // TODO: Consider removing D entirely
+    let _d = transcript.squeeze(LABEL_PAIRING_D)?;
 
     // * Main Cost (Verifier) III: MSM of 2
     // let ll = lhs_1_1 + lhs_1_2 * d;
@@ -1346,68 +1350,104 @@ where
   }
 }
 
-// #[cfg(test)]
-// mod tests {
-//   use ff::Field;
-//   use rand_core::OsRng;
-//   use rayon::iter::{IntoParallelIterator, ParallelIterator};
+#[cfg(test)]
+mod tests {
+  use ff::Field;
+  use rand_core::OsRng;
+  use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
-//   use crate::spartan::polys::multilinear::MultilinearPolynomial;
-//   use crate::traits::commitment::CommitmentEngineTrait;
-//   use crate::traits::evaluation::EvaluationEngineTrait;
-//   use crate::traits::{Engine, TranscriptEngineTrait};
-//   use crate::{provider::Bn256EngineBivariateKZG, spartan::polys::univariate::UniPoly};
+  use crate::spartan::polys::multilinear::MultilinearPolynomial;
+  use crate::traits::commitment::CommitmentEngineTrait;
+  use crate::traits::evaluation::EvaluationEngineTrait;
+  use crate::traits::{Engine, TranscriptEngineTrait};
+  use crate::{provider::Bn256EngineBivariateKZG, spartan::polys::univariate::UniPoly};
 
-//   type F = halo2curves::bn256::Fr;
-//   type E = Bn256EngineBivariateKZG;
-//   type EE = super::EvaluationEngine<E>;
+  type F = halo2curves::bn256::Fr;
+  type E = Bn256EngineBivariateKZG;
+  type EE = super::EvaluationEngine<E>;
 
-//   fn prove_and_verify<EE: EvaluationEngineTrait<E>>(log_n: usize) -> EE::EvaluationArgument {
-//     let n = 1 << log_n;
-//     let poly = UniPoly {
-//       coeffs: (0..n)
-//         .into_par_iter()
-//         .map(|_| F::random(OsRng))
-//         .collect::<Vec<_>>(),
-//     };
-//     let point = (0..log_n).map(|_| F::random(OsRng)).collect::<Vec<_>>();
+  fn padded_transpose(coeffs: &[F], log_n: usize) -> Vec<F> {
+    let padded_log_n = if log_n % 2 == 1 { log_n + 1 } else { log_n };
+    let b = 1 << (padded_log_n / 2);
 
-//     let ck = <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey::setup_from_rng(
-//       b"test", n, OsRng,
-//     );
+    let mut padded = coeffs.to_vec();
+    padded.resize(b * b, F::ZERO);
 
-//     let (pk, vk) = EE::setup(&ck).unwrap();
+    super::transpose_coeffs(&padded, b, b)
+  }
 
-//     let eval = MultilinearPolynomial::new(poly.coeffs.clone()).evaluate(&point);
+  fn prove_and_verify(log_n: usize) {
+    use crate::provider::traits::DlogGroup;
 
-//     let mut transcript = <E as Engine>::TE::new(b"test");
+    let n = 1 << log_n;
+    let poly = UniPoly {
+      coeffs: (0..n)
+        .into_par_iter()
+        .map(|_| F::random(OsRng))
+        .collect::<Vec<_>>(),
+    };
+    let point = (0..log_n).map(|_| F::random(OsRng)).collect::<Vec<_>>();
 
-//     let comm = <E as Engine>::CE::commit(&ck, &poly.coeffs, &F::ZERO);
+    let setup_n = if log_n % 2 == 1 { 1 << (log_n + 1) } else { n };
+    let ck = <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey::setup_from_rng(
+      b"test", setup_n, OsRng,
+    );
 
-//     let arg = EE::prove(
-//       &ck,
-//       &pk,
-//       &mut transcript,
-//       &comm,
-//       &poly.coeffs,
-//       &point,
-//       &eval,
-//     )
-//     .unwrap();
+    let (pk, vk) = EE::setup(&ck).unwrap();
 
-//     let mut transcript = <E as Engine>::TE::new(b"test");
-//     EE::verify(&vk, &mut transcript, &comm, &point, &eval, &arg).unwrap();
+    let eval = MultilinearPolynomial::new(poly.coeffs.clone()).evaluate(&point);
 
-//     arg
-//   }
+    let mut transcript = <E as Engine>::TE::new(b"test");
 
-//   #[test]
-//   fn test_mercury_evaluation_engine_15() {
-//     prove_and_verify::<EE>(15);
-//   }
+    let comm_coeffs = padded_transpose(&poly.coeffs, log_n);
+    let comm = <E as Engine>::CE::commit(&ck, &comm_coeffs, &F::ZERO);
 
-//   #[test]
-//   fn test_mercury_evaluation_engine_16() {
-//     prove_and_verify::<EE>(16);
-//   }
-// }
+    let arg = EE::prove(
+      &ck,
+      &pk,
+      &mut transcript,
+      &comm,
+      &poly.coeffs,
+      &point,
+      &eval,
+    )
+    .unwrap();
+
+    // Valid proof
+    let mut transcript = <E as Engine>::TE::new(b"test");
+    assert!(
+      EE::verify(&vk, &mut transcript, &comm, &point, &eval, &arg).is_ok(),
+      "valid proof should be accepted"
+    );
+
+    let gen = <<E as crate::traits::Engine>::GE as DlogGroup>::gen().affine();
+
+    // Tampered pi_1
+    let mut arg_tamper_pi1 = arg.clone();
+    arg_tamper_pi1.pi_1 = gen;
+    let mut transcript = <E as Engine>::TE::new(b"test");
+    assert!(
+      EE::verify(&vk, &mut transcript, &comm, &point, &eval, &arg_tamper_pi1).is_err(),
+      "tampered pi_1 should be rejected"
+    );
+
+    // Tampered pi_2
+    let mut arg_tamper_pi2 = arg.clone();
+    arg_tamper_pi2.pi_2 = gen;
+    let mut transcript = <E as Engine>::TE::new(b"test");
+    assert!(
+      EE::verify(&vk, &mut transcript, &comm, &point, &eval, &arg_tamper_pi2).is_err(),
+      "tampered pi_2 should be rejected"
+    );
+  }
+
+  #[test]
+  fn test_chopin_evaluation_engine_15() {
+    prove_and_verify(15);
+  }
+
+  #[test]
+  fn test_chopin_evaluation_engine_16() {
+    prove_and_verify(16);
+  }
+}
