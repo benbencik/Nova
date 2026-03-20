@@ -733,11 +733,6 @@ where
       }
     }
 
-    // commit to q1(X, Y) as [q1(tau, sigma)]_1
-    let pi1 = E::CE::commit(ck, &q1_coeffs, &E::Scalar::ZERO)
-      .comm
-      .affine();
-
     // =======================================================
     // compute q2(Y) = (f(alpha, Y) - f(alpha, beta)) / (Y - beta)
     //
@@ -749,9 +744,19 @@ where
     for (j, &coef) in q2.iter().enumerate() {
       q2_coeffs[j * b] = coef;
     }
-    let pi2 = E::CE::commit(ck, &q2_coeffs, &E::Scalar::ZERO)
-      .comm
-      .affine();
+
+    let (pi1, pi2) = rayon::join(
+      || {
+        E::CE::commit(ck, &q1_coeffs, &E::Scalar::ZERO)
+          .comm
+          .affine()
+      },
+      || {
+        E::CE::commit(ck, &q2_coeffs, &E::Scalar::ZERO)
+          .comm
+          .affine()
+      },
+    );
 
     Ok(EvaluationArgument { pi1, pi2 })
   }
