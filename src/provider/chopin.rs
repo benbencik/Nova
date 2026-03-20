@@ -1,5 +1,5 @@
 //! This module implements Chopin an adaptation of `Mercury` (<https://eprint.iacr.org/2025/385.pdf>)
-//! that uses bivariate KZG 
+//! that uses bivariate KZG
 //!
 //! The batch KZG evaluation tech is from BDFG20 <https://eprint.iacr.org/2020/081.pdf>
 //!
@@ -42,7 +42,6 @@ mod transcript_labels {
   pub const LABEL_H: &[u8] = b"h";
   pub const LABEL_G: &[u8] = b"g";
   pub const LABEL_S: &[u8] = b"s";
-  pub const LABEL_D: &[u8] = b"d";
   pub const LABEL_GZ: &[u8] = b"gz";
   pub const LABEL_GZI: &[u8] = b"gzi";
   pub const LABEL_HZ: &[u8] = b"hz";
@@ -72,7 +71,7 @@ pub struct EvaluationEngine<E: Engine> {
 }
 
 /// Provides an implementation of a polynomial evaluation argument
-/// The proof consists of 8 field elements (F) for committed values and 6 field elements (F) for evaluation values,
+/// The proof consists of 7 field elements (F) for committed values and 6 field elements (F) for evaluation values,
 /// corresponding to the structure of the EvaluationArgument. This reflects the number of field elements included in the proof.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -87,8 +86,6 @@ where
 
   comm_s: Commitment<E>,
 
-  comm_d: Commitment<E>,
-
   /// !This is public only to make it accessible in the tests  
   /// Bivariate KZG opening proof: [q1(tau, sigma)]_1 where q1(X, Y) = (f(X, Y) - f(alpha, Y)) / (X - alpha)
   pub pi_1: <<E as Engine>::GE as DlogGroup>::AffineGroupElement,
@@ -97,7 +94,7 @@ where
   pub pi_2: <<E as Engine>::GE as DlogGroup>::AffineGroupElement,
 
   comm_w: Commitment<E>,
-  
+
   comm_w_prime: Commitment<E>,
 
   #[serde_as(as = "EvmCompatSerde")]
@@ -452,7 +449,6 @@ mod batch_evaluation {
     pub h_alpha: Scalar,
     pub s_zeta: Scalar,
     pub s_zeta_inv: Scalar,
-    pub d_zeta: Scalar,
 
     pub zeta: Scalar,
     pub zeta_inv: Scalar,
@@ -463,7 +459,6 @@ mod batch_evaluation {
     pub comm_g: <<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment,
     pub comm_h: <<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment,
     pub comm_s: <<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment,
-    pub comm_d: <<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment,
 
     pub comm_w: <<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment,
     pub comm_w_prime: <<E as Engine>::CE as CommitmentEngineTrait<E>>::Commitment,
@@ -475,7 +470,6 @@ mod batch_evaluation {
     pub g_poly: &'a UniPoly<Scalar>,
     pub h_poly: &'a UniPoly<Scalar>,
     pub s_poly: &'a UniPoly<Scalar>,
-    pub d_poly: &'a UniPoly<Scalar>,
   }
 
   pub struct BatchArg<E: Engine>
@@ -509,23 +503,20 @@ mod batch_evaluation {
     // Random challenge `beta`, which is `gamma` in BDFG20 4.1
     let beta = transcript.squeeze(LABEL_BETA)?;
     let beta_2 = beta * beta;
-    let beta_3 = beta_2 * beta;
 
-    // Interpolate g_star, h_star, s_star, d_star
+    // Interpolate g_star, h_star, s_star
     // See BDFG20 Definition 2.3 - "open" 6.
-    let [g_star, h_star, s_star, d_star] = {
+    let [g_star, h_star, s_star] = {
       let eval_domains = vec![
         vec![&zeta, &zeta_inv],
         vec![&zeta, &zeta_inv, &alpha],
         vec![&zeta, &zeta_inv],
-        vec![&zeta],
       ];
 
       let evals = vec![
         vec![evals.g_zeta, evals.g_zeta_inv],
         vec![evals.h_zeta, evals.h_zeta_inv, evals.h_alpha],
         vec![evals.s_zeta, evals.s_zeta_inv],
-        vec![evals.d_zeta],
       ];
 
       eval_domains
@@ -545,27 +536,20 @@ mod batch_evaluation {
       //             z_poly_t_s1(X) * (g(X) - g*(X))
       // + beta   * (z_poly_t_s2(X) * (h(X) - h*(X)))
       // + beta^2 * (z_poly_t_s3(X) * (s(X) - s*(X)))
-      // + beta^3 * (z_poly_t_s4(X) * (d(X) - d*(X)))
 
       let mut polys = [
         data.g_poly.clone(),
         data.h_poly.clone(),
         data.s_poly.clone(),
-        data.d_poly.clone(),
       ];
 
-      let rhs_polys = [
-        &g_star.coeffs,
-        &h_star.coeffs,
-        &s_star.coeffs,
-        &d_star.coeffs,
-      ];
+      let rhs_polys = [&g_star.coeffs, &h_star.coeffs, &s_star.coeffs];
 
       polys.par_iter_mut().zip(rhs_polys).for_each(|(poly, rhs)| {
         poly.batch_add_with_polynomials_chopin(vec![rhs], &[-E::Scalar::ONE]);
       });
 
-      let vanishing_points_t_s = [vec![alpha], vec![], vec![alpha], vec![alpha, zeta_inv]];
+      let vanishing_points_t_s = [vec![alpha], vec![], vec![alpha]];
 
       polys
         .par_iter_mut()
@@ -576,14 +560,11 @@ mod batch_evaluation {
           }
         });
 
-      let [g, h, s, d] = polys;
+      let [g, h, s] = polys;
 
       let mut m_poly = g;
 
-      m_poly.batch_add_with_polynomials_chopin(
-        vec![&h.coeffs, &s.coeffs, &d.coeffs],
-        &[beta, beta_2, beta_3],
-      );
+      m_poly.batch_add_with_polynomials_chopin(vec![&h.coeffs, &s.coeffs], &[beta, beta_2]);
 
       m_poly
     };
@@ -619,12 +600,11 @@ mod batch_evaluation {
       // =          z_poly_t_s1(z) * (g_poly(X) - g_star(z))
       // + beta   * z_poly_t_s2(z) * (h_poly(X) - h_star(z))
       // + beta^2 * z_poly_t_s3(z) * (s_poly(X) - s_star(z))
-      // + beta^3 * z_poly_t_s4(z) * (d_poly(X) - d_star(z))
       //           lhs                   rhs
 
       let mz_poly = {
-        let [g_poly_z, h_poly_z, s_poly_z, d_poly_z] = {
-          let poly_star_eval = [&g_star, &h_star, &s_star, &d_star]
+        let [g_poly_z, h_poly_z, s_poly_z] = {
+          let poly_star_eval = [&g_star, &h_star, &s_star]
             .into_par_iter()
             .map(|poly| poly.evaluate(&z))
             .collect::<Vec<_>>();
@@ -633,7 +613,6 @@ mod batch_evaluation {
             data.g_poly.clone(),
             data.h_poly.clone(),
             data.s_poly.clone(),
-            data.d_poly.clone(),
           ];
 
           polys
@@ -650,15 +629,14 @@ mod batch_evaluation {
           t_s1_eval_at_z,
           t_s2_eval_at_z * beta,
           t_s3_eval_at_z * beta_2,
-          t_s4_eval_at_z * beta_3,
         ];
 
         let mut mz_poly = g_poly_z;
         mz_poly.scale_chopin(&scalars[0]);
 
         mz_poly.batch_add_with_polynomials_chopin(
-          vec![&h_poly_z.coeffs, &s_poly_z.coeffs, &d_poly_z.coeffs],
-          &[scalars[1], scalars[2], scalars[3]],
+          vec![&h_poly_z.coeffs, &s_poly_z.coeffs],
+          &[scalars[1], scalars[2]],
         );
 
         mz_poly
@@ -718,7 +696,6 @@ mod batch_evaluation {
 
     let beta = transcript.squeeze(LABEL_BETA)?;
     let beta_2 = beta.pow([2]);
-    let beta_3 = beta.pow([3]);
 
     transcript.absorb(LABEL_W, &[cm.comm_w].to_vec().as_slice());
 
@@ -732,12 +709,10 @@ mod batch_evaluation {
     );
     let s_star =
       UniPoly::from_evals_with_xs_chopin(&[&zeta, &zeta_inv], &[evals.s_zeta, evals.s_zeta_inv]);
-    let d_star = UniPoly::from_evals_with_xs_chopin(&[&zeta], &[evals.d_zeta]);
 
     let g_star_eval = g_star.evaluate(&z);
     let h_star_eval = h_star.evaluate(&z);
     let s_star_eval = s_star.evaluate(&z);
-    let d_star_eval = d_star.evaluate(&z);
 
     let van_zeta = z - zeta;
     let van_zeta_inv = z - zeta_inv;
@@ -755,14 +730,12 @@ mod batch_evaluation {
     let scalars = {
       let scalar = z_eval_t_s1 * g_star_eval
         + beta * z_eval_t_s2 * h_star_eval
-        + beta_2 * z_eval_t_s3 * s_star_eval
-        + beta_3 * z_eval_t_s4 * d_star_eval;
+        + beta_2 * z_eval_t_s3 * s_star_eval;
 
       [
         z_eval_t_s1,
         beta * z_eval_t_s2,
         beta_2 * z_eval_t_s3,
-        beta_3 * z_eval_t_s4,
         -scalar,
         -z_eval_t,
         z,
@@ -773,7 +746,6 @@ mod batch_evaluation {
       cm.comm_g,
       cm.comm_h,
       cm.comm_s,
-      cm.comm_d,
       g1,
       cm.comm_w,
       cm.comm_w_prime,
@@ -1028,42 +1000,27 @@ where
     }
 
     // * 8. Mercury Section 6. Step 3. (c)
-    // Compute d(X) for degree check
-    let d_poly = {
-      let mut coeffs = Vec::with_capacity(g_poly.coeffs.len());
-      coeffs.extend(g_poly.coeffs.iter().rev());
-
-      assert_eq!(coeffs.len(), b);
-
-      UniPoly { coeffs }
-    };
-
-    // * Send commitments of 7. and 8.
-    let (comm_s, comm_d) = rayon::join(
-      || E::CE::commit(&uni_ck, &s_poly.coeffs, &E::Scalar::ZERO),
-      || E::CE::commit(&uni_ck, &d_poly.coeffs, &E::Scalar::ZERO),
-    );
+    // Send commitment of 7.
+    let comm_s = E::CE::commit(&uni_ck, &s_poly.coeffs, &E::Scalar::ZERO);
 
     transcript.absorb(LABEL_S, &[comm_s].to_vec().as_slice());
-    transcript.absorb(LABEL_D, &[comm_d].to_vec().as_slice());
 
     // * 9. Mercury Section 6. Step 4. (a)
     let zeta = transcript.squeeze(LABEL_ZETA)?;
 
     let zeta_inv = &zeta.invert().unwrap();
 
-    let [g_zeta, g_zeta_inv, h_zeta, h_zeta_inv, h_alpha, s_zeta, s_zeta_inv, d_zeta] = {
+    let [g_zeta, g_zeta_inv, h_zeta, h_zeta_inv, h_alpha, s_zeta, s_zeta_inv] = {
       let eval_domains = [
         vec![&zeta, &zeta_inv],
         vec![&zeta, &zeta_inv, &alpha],
         vec![&zeta, &zeta_inv],
-        vec![&zeta],
       ];
 
-      // Evaluate g(zeta), g(zeta_inv), h(zeta), h(zeta_inv), h(alpha), s(zeta), s(zeta_inv), d(zeta)
+      // Evaluate g(zeta), g(zeta_inv), h(zeta), h(zeta_inv), h(alpha), s(zeta), s(zeta_inv)
 
       let polys = [
-        &g_poly, &g_poly, &h_poly, &h_poly, &h_poly, &s_poly, &s_poly, &d_poly,
+        &g_poly, &g_poly, &h_poly, &h_poly, &h_poly, &s_poly, &s_poly,
       ];
 
       let xs = eval_domains.iter().flatten().collect::<Vec<_>>();
@@ -1121,7 +1078,6 @@ where
           h_alpha,
           s_zeta,
           s_zeta_inv,
-          d_zeta,
           zeta,
           zeta_inv: *zeta_inv,
           alpha,
@@ -1129,7 +1085,6 @@ where
         g_poly: &g_poly,
         h_poly: &h_poly,
         s_poly: &s_poly,
-        d_poly: &d_poly,
       },
       transcript,
     )?;
@@ -1142,7 +1097,6 @@ where
       comm_h,
       comm_g,
       comm_s,
-      comm_d,
       pi_1,
       pi_2,
       comm_w,
@@ -1191,9 +1145,6 @@ where
       // * Mercury Section 6. Step 3. (b)
       transcript.absorb(LABEL_S, &[arg.comm_s].to_vec().as_slice());
 
-      // * Mercury Section 6. Step 3. (c)
-      transcript.absorb(LABEL_D, &[arg.comm_d].to_vec().as_slice());
-
       // * 3. Mercury Section 6. Step 4. (a)
       let zeta = transcript.squeeze(LABEL_ZETA)?;
 
@@ -1206,8 +1157,6 @@ where
       transcript.absorb(LABEL_SZI, &[arg.s_zeta_inv].to_vec().as_slice());
 
       // * Mercury Section 6. Step 4. (d)
-      // TODO: Maybe absorb bivariate proof pi
-
       (alpha, gamma, zeta)
     };
 
@@ -1230,7 +1179,6 @@ where
     let u_col = point.split_at(log_n - log_row).1.to_vec();
 
     let zeta_inv = zeta.invert().unwrap();
-    let zeta_b_one = zeta.pow_vartime([(1_u64 << (log_n / 2)) - 1]);
 
     // * O(log n) Field Operations
     let pu_col_zeta = eval_pu_poly(&u_col, &zeta);
@@ -1238,11 +1186,8 @@ where
     let pu_row_zeta = eval_pu_poly(&u_row, &zeta);
     let pu_row_zeta_inv = eval_pu_poly(&u_row, &zeta_inv);
 
-    // Compute `d_zeta`` and `h_alpha`
+    // Compute h_alpha
     // * 4. Mercury Section 6. Step 4. (c)
-
-    // * Implicit Degree Check
-    let d_zeta = zeta_b_one * arg.g_zeta_inv;
 
     // * Implicit IPA Check
     let h_alpha = {
@@ -1306,13 +1251,11 @@ where
         h_alpha,
         s_zeta: arg.s_zeta,
         s_zeta_inv: arg.s_zeta_inv,
-        d_zeta,
       },
       BatchEvaluationCommitments::<E> {
         comm_g: arg.comm_g,
         comm_h: arg.comm_h,
         comm_s: arg.comm_s,
-        comm_d: arg.comm_d,
         comm_w: arg.comm_w,
         comm_w_prime: arg.comm_w_prime,
       },
