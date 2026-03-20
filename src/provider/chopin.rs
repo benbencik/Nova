@@ -34,6 +34,72 @@ use crate::{
   },
 };
 
+use std::sync::Mutex;
+
+/// timing measurements
+#[derive(Debug, Clone, Copy)]
+pub struct ChopinTiming {
+  /// time spent in divide_by_binomial operation (milliseconds)
+  pub gq_poly_construction_ms: f64,
+  /// time spent in pairing operations (milliseconds)
+  pub pairing_operations_ms: f64,
+  /// time spent committing q (milliseconds)
+  pub commit_pi_ms: f64,
+  /// time spent committing g (milliseconds)
+  pub commit_g_ms: f64,
+  /// time spent committing h (milliseconds)
+  pub commit_h_ms: f64,
+  /// time spent committing batch proof (π') (milliseconds)
+  pub commit_batch_proof_ms: f64,
+}
+
+/// global timing measurements
+static CHOPIN_TIMINGS: Mutex<ChopinTiming> = Mutex::new(ChopinTiming {
+  gq_poly_construction_ms: 0.0,
+  pairing_operations_ms: 0.0,
+  commit_pi_ms: 0.0,
+  commit_g_ms: 0.0,
+  commit_h_ms: 0.0,
+  commit_batch_proof_ms: 0.0,
+});
+
+impl ChopinTiming {
+  /// get the current timing measurements
+  pub fn get() -> Self {
+    *CHOPIN_TIMINGS.lock().unwrap()
+  }
+
+  /// set timing
+  pub fn set_divide_by_binomial(ms: f64) {
+    CHOPIN_TIMINGS.lock().unwrap().gq_poly_construction_ms = ms;
+  }
+
+  /// set timing
+  pub fn set_pairing_operations(ms: f64) {
+    CHOPIN_TIMINGS.lock().unwrap().pairing_operations_ms = ms;
+  }
+
+  /// set timing
+  pub fn set_commit_pi(ms: f64) {
+    CHOPIN_TIMINGS.lock().unwrap().commit_pi_ms = ms;
+  }
+
+  /// set timing
+  pub fn set_commit_g(ms: f64) {
+    CHOPIN_TIMINGS.lock().unwrap().commit_g_ms = ms;
+  }
+
+  /// set timing
+  pub fn set_commit_h(ms: f64) {
+    CHOPIN_TIMINGS.lock().unwrap().commit_h_ms = ms;
+  }
+
+  /// set timing
+  pub fn set_commit_batch_proof(ms: f64) {
+    CHOPIN_TIMINGS.lock().unwrap().commit_batch_proof_ms = ms;
+  }
+}
+
 // Transcript absorb/squeeze labels used by both prover and verifier
 mod transcript_labels {
   pub const LABEL_F: &[u8] = b"f";
@@ -663,7 +729,13 @@ mod batch_evaluation {
     };
 
     // W'(X) = quot_l(X)
-    let comm_w_prime = E::CE::commit(ck, &quot_l_poly.coeffs, &E::Scalar::ZERO);
+    let comm_w_prime = {
+      let start = std::time::Instant::now();
+      let c = E::CE::commit(ck, &quot_l_poly.coeffs, &E::Scalar::ZERO);
+      let elapsed = start.elapsed();
+      super::ChopinTiming::set_commit_batch_proof(elapsed.as_secs_f64() * 1000.0);
+      c
+    };
 
     Ok(BatchArg {
       comm_w,
@@ -794,6 +866,7 @@ where
     eval: &E::Scalar,
   ) -> Result<Self::EvaluationArgument, NovaError> {
     use batch_evaluation::*;
+    use std::time::Instant;
     use transcript_labels::*;
 
     let comm_f = comm;
@@ -886,7 +959,13 @@ where
 
     // * 4. Mercury Section 6. Step 2. (b)
     // Compute q(X) and g(X)
-    let (mut q_poly, g_poly) = divide_by_binomial(&f_poly, b, b, &alpha);
+    let (mut q_poly, g_poly) = {
+      let start = Instant::now();
+      let result = divide_by_binomial(&f_poly, b, b, &alpha);
+      let elapsed = start.elapsed();
+      ChopinTiming::set_divide_by_binomial(elapsed.as_secs_f64() * 1000.0);
+      result
+    };
 
     q_poly.trim_chopin();
 
@@ -937,7 +1016,17 @@ where
 
     // * 5. Mercury Section 6. Step 2. (c)
     // * Main Cost (Prover) I: MSM of O(N^{1/2})
-    let comm_g = E::CE::commit(&uni_ck, &g_poly.coeffs, &E::Scalar::ZERO);
+    let comm_g = {
+      let start = Instant::now();
+      println!(
+        "Polynomial g degree: {}",
+        g_poly.coeffs.len().saturating_sub(1)
+      );
+      let c = E::CE::commit(ck, &g_poly.coeffs, &E::Scalar::ZERO);
+      let elapsed = start.elapsed();
+      ChopinTiming::set_commit_g(elapsed.as_secs_f64() * 1000.0);
+      c
+    };
 
     transcript.absorb(LABEL_G, &[comm_g].to_vec().as_slice());
 
@@ -1059,6 +1148,8 @@ where
         &biv_point,
         &g_zeta,
       )?;
+
+      ChopinTiming::set_commit_pi(bivariatekzg::pi_commit_ms());
 
       (*biv_arg.pi1(), *biv_arg.pi2())
     };
@@ -1265,8 +1356,6 @@ where
 
     // Final pairing check for the batched univariate opening.
     transcript.absorb(LABEL_W_PRIME, &[arg.comm_w_prime].to_vec().as_slice());
-    // TODO: Consider removing D entirely
-    let _d = transcript.squeeze(LABEL_PAIRING_D)?;
 
     // * Main Cost (Verifier) III: MSM of 2
     // let ll = lhs_1_1 + lhs_1_2 * d;

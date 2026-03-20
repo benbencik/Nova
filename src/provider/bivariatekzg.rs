@@ -31,6 +31,7 @@ use rand_core::OsRng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+use std::{sync::Mutex, time::Instant};
 
 /// Alias to points on G1 that are in preprocessed form
 type G1Affine<E> = <<E as Engine>::GE as DlogGroup>::AffineGroupElement;
@@ -40,6 +41,18 @@ type G2Affine<E> = <<<E as Engine>::GE as PairingGroup>::G2 as DlogGroup>::Affin
 
 /// Default number of target chunks used in splitting up polynomial division in the kzg_open closure
 const _DEFAULT_TARGET_CHUNKS: usize = 1 << 10;
+
+static BIVARIATE_KZG_PI_COMMIT_MS: Mutex<f64> = Mutex::new(0.0);
+
+/// Returns commit time for the pi proof
+pub fn pi_commit_ms() -> f64 {
+  *BIVARIATE_KZG_PI_COMMIT_MS.lock().unwrap()
+}
+
+/// Sets the commit time for the pi proof
+fn set_pi_commit_ms(ms: f64) {
+  *BIVARIATE_KZG_PI_COMMIT_MS.lock().unwrap() = ms;
+}
 
 /// KZG commitment key
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -334,7 +347,7 @@ pub struct CommitmentEngine<E: Engine> {
 
 /// Test-only methods for generating commitment keys with known tau.
 /// These methods are insecure for production use - use `load_setup` with ptau files instead.
-#[cfg(any(test, feature = "test-utils"))]
+// #[cfg(any(test, feature = "test-utils"))]
 impl<E: Engine> CommitmentKey<E>
 where
   E::GE: PairingGroup,
@@ -745,6 +758,7 @@ where
       q2_coeffs[j * b] = coef;
     }
 
+    let start_parallel_commits = Instant::now();
     let (pi1, pi2) = rayon::join(
       || {
         E::CE::commit(ck, &q1_coeffs, &E::Scalar::ZERO)
@@ -757,6 +771,7 @@ where
           .affine()
       },
     );
+    set_pi_commit_ms(start_parallel_commits.elapsed().as_secs_f64() * 1000.0);
 
     Ok(EvaluationArgument { pi1, pi2 })
   }

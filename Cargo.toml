@@ -96,3 +96,7 @@ evm = []
 io = []
 # Enables insecure setup methods that generate random tau. Only for testing!
 test-utils = []
+
+[[bin]]
+name = "chopin"
+path = "benches/chopin.rs"
