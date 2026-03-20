@@ -1,11 +1,6 @@
-// TODO: Rewrite this
-//! This module implements Nova's evaluation engine using `HyperKZG`, a KZG-based polynomial commitment for multilinear polynomials
-//! HyperKZG is based on the transformation from univariate PCS to multilinear PCS in the Gemini paper (section 2.4.2 in <https://eprint.iacr.org/2022/420.pdf>).
-//! However, there are some key differences:
-//! (1) HyperKZG works with multilinear polynomials represented in evaluation form (rather than in coefficient form in Gemini's transformation).
-//! This means that Spartan's polynomial IOP can use commit to its polynomials as-is without incurring any interpolations or FFTs.
-//! (2) HyperKZG is specialized to use KZG as the univariate commitment scheme, so it includes several optimizations (both during the transformation of multilinear-to-univariate claims
-//! and within the KZG commitment scheme implementation itself).
+//! This module implements bivariate KZG used in Chopin protocol
+//! The code is adapted from the implementation of hyperkzg.rs
+
 #![allow(non_snake_case)]
 #[cfg(feature = "io")]
 use crate::provider::ptau::PtauFileError;
@@ -20,8 +15,7 @@ use crate::{
     commitment::{CommitmentEngineTrait, CommitmentTrait, Len},
     evaluation::EvaluationEngineTrait,
     evm_serde::EvmCompatSerde,
-    AbsorbInRO2Trait, AbsorbInROTrait, Engine, Group, ROTrait, TranscriptEngineTrait,
-    TranscriptReprTrait,
+    AbsorbInRO2Trait, AbsorbInROTrait, Engine, Group, ROTrait, TranscriptReprTrait,
   },
 };
 use core::{
@@ -30,8 +24,6 @@ use core::{
   ops::{Add, Mul, MulAssign},
 };
 use ff::Field;
-#[cfg(any(test, feature = "test-utils"))]
-use ff::PrimeFieldBits;
 use num_integer::Integer;
 use num_traits::ToPrimitive;
 #[cfg(any(test, feature = "test-utils"))]
@@ -47,7 +39,7 @@ type G1Affine<E> = <<E as Engine>::GE as DlogGroup>::AffineGroupElement;
 type G2Affine<E> = <<<E as Engine>::GE as PairingGroup>::G2 as DlogGroup>::AffineGroupElement;
 
 /// Default number of target chunks used in splitting up polynomial division in the kzg_open closure
-const DEFAULT_TARGET_CHUNKS: usize = 1 << 10;
+const _DEFAULT_TARGET_CHUNKS: usize = 1 << 10;
 
 /// KZG commitment key
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -414,6 +406,7 @@ where
     powers_of_tau
   }
 
+  #[allow(unused, unreachable_code)]
   fn compute_powers_par(_tau: E::Scalar, _n: usize) -> Vec<E::Scalar> {
     !unimplemented!("use just serial version, setup is not included in benchmarks");
   }
@@ -504,16 +497,18 @@ where
   }
 
   #[cfg(feature = "io")]
+  #[allow(unreachable_code)]
   fn load_setup(
-    reader: &mut (impl std::io::Read + std::io::Seek),
-    label: &'static [u8],
-    n: usize,
+    _reader: &mut (impl std::io::Read + std::io::Seek),
+    _label: &'static [u8],
+    _n: usize,
   ) -> Result<Self::CommitmentKey, PtauFileError> {
     !unimplemented!("loading from files not needed for benches");
   }
 
   /// Save keys
   #[cfg(feature = "io")]
+  #[allow(unreachable_code)]
   fn save_setup(
     _ck: &Self::CommitmentKey,
     mut _writer: &mut (impl std::io::Write + std::io::Seek),
@@ -650,49 +645,6 @@ pub struct EvaluationEngine<E: Engine> {
   _p: PhantomData<E>,
 }
 
-impl<E: Engine> EvaluationEngine<E>
-where
-  E::GE: PairingGroup,
-{
-  // This impl block defines helper functions that are not a part of
-  // EvaluationEngineTrait, but that we will use to implement the trait methods.
-  fn compute_challenge(com: &[G1Affine<E>], transcript: &mut <E as Engine>::TE) -> E::Scalar {
-    transcript.absorb(b"c", &com.to_vec().as_slice());
-
-    transcript.squeeze(b"c").unwrap()
-  }
-
-  // Compute challenge q = Hash(vk, C0, ..., C_{k-1}, u0, ...., u_{t-1},
-  // (f_i(u_j))_{i=0..k-1,j=0..t-1})
-  fn get_batch_challenge(v: &[[E::Scalar; 3]], transcript: &mut <E as Engine>::TE) -> E::Scalar {
-    transcript.absorb(
-      b"v",
-      &v.iter()
-        .flatten()
-        .cloned()
-        .collect::<Vec<E::Scalar>>()
-        .as_slice(),
-    );
-
-    transcript.squeeze(b"r").unwrap()
-  }
-
-  fn batch_challenge_powers(q: E::Scalar, k: usize) -> Vec<E::Scalar> {
-    // Compute powers of q : (1, q, q^2, ..., q^(k-1))
-    let mut q_powers = vec![E::Scalar::ONE; k];
-    for i in 1..k {
-      q_powers[i] = q_powers[i - 1] * q;
-    }
-    q_powers
-  }
-
-  fn verifier_second_challenge(W: &[G1Affine<E>], transcript: &mut <E as Engine>::TE) -> E::Scalar {
-    transcript.absorb(b"W", &W.to_vec().as_slice());
-
-    transcript.squeeze(b"d").unwrap()
-  }
-}
-
 impl<E> EvaluationEngineTrait<E> for EvaluationEngine<E>
 where
   E: Engine<CE = CommitmentEngine<E>>,
@@ -804,7 +756,7 @@ where
     Ok(EvaluationArgument { pi1, pi2 })
   }
 
-  /// A method to verify purported evaluations of a batch of polynomials
+  /// A method to verify evaluations of polynomials
   fn verify(
     vk: &Self::VerifierKey,
     _transcript: &mut <E as Engine>::TE,
@@ -854,28 +806,6 @@ fn eval_univariate<F: Field>(poly: &[F], x: F) -> F {
   acc
 }
 
-fn bivariate_eval<F: Field>(poly: &[F], x: F, y: F) -> F {
-  use num_integer::Roots;
-
-  let n = poly.len();
-  let b = n.sqrt();
-
-  let mut result = F::ZERO;
-  let mut y_pow = F::ONE;
-
-  for j in 0..b {
-    let mut row_eval = F::ZERO;
-    let mut x_pow = F::ONE;
-    for i in 0..b {
-      row_eval += poly[j * b + i] * x_pow;
-      x_pow *= x;
-    }
-    result += row_eval * y_pow;
-    y_pow *= y;
-  }
-  result
-}
-
 /// Divide polynomial by term linear term and returns the quotient
 /// p(X) = p_0 + p_1 X + ... + p_{n-1} X^{n-1}
 /// Calculate q(X) such that p(X) - p(r) = (X - r) * q(X)
@@ -903,6 +833,28 @@ mod tests {
 
   type E = Bn256EngineBivariateKZG;
   type Fr = <E as Engine>::Scalar;
+
+  fn bivariate_eval<F: Field>(poly: &[F], x: F, y: F) -> F {
+    use num_integer::Roots;
+
+    let n = poly.len();
+    let b = n.sqrt();
+
+    let mut result = F::ZERO;
+    let mut y_pow = F::ONE;
+
+    for j in 0..b {
+      let mut row_eval = F::ZERO;
+      let mut x_pow = F::ONE;
+      for i in 0..b {
+        row_eval += poly[j * b + i] * x_pow;
+        x_pow *= x;
+      }
+      result += row_eval * y_pow;
+      y_pow *= y;
+    }
+    result
+  }
 
   #[test]
   fn test_eval_univariate() {
@@ -1082,36 +1034,5 @@ mod tests {
         EvaluationEngine::verify(&vk, &mut verifier_tr2, &C, &point, &eval, &bad_proof).is_err()
       );
     }
-  }
-}
-
-#[cfg(test)]
-mod evm_tests {
-  use super::*;
-  use crate::provider::Bn256EngineKZG;
-
-  #[test]
-  #[ignore]
-  fn test_commitment_evm_serialization() {
-    type E = Bn256EngineKZG;
-
-    let comm = Commitment::<E>::default();
-    let bytes = bincode::serde::encode_to_vec(comm, bincode::config::legacy()).unwrap();
-
-    println!(
-      "Commitment serialized length in nova-snark: {} bytes",
-      bytes.len()
-    );
-    println!(
-      "Commitment hex: {}",
-      hex::encode(&bytes[..std::cmp::min(64, bytes.len())])
-    );
-
-    // Expect 64 bytes for EVM feature, else 32 bytes
-    assert_eq!(
-      bytes.len(),
-      if cfg!(feature = "evm") { 64 } else { 32 },
-      "Commitment serialization length mismatch"
-    );
   }
 }

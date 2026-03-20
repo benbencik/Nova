@@ -1,18 +1,9 @@
-//! This module implements Nova's evaluation engine using `Mercury` (<https://eprint.iacr.org/2025/385.pdf>)
-//! Mercury is a pairing-based polynomial commitment scheme for multilinear polynomials.
-//!
-//! For a polynomial of size n, the construction of an opening proof requires O(n) field operations, and 2n + O(√n) scalar multiplications.
-//! The opening proof size is constant.
-//! The verification consists of O(log n) field operations and O(1) scalar multiplications, along with 2 pairings.
+//! This module implements Chopin an adaptation of `Mercury` (<https://eprint.iacr.org/2025/385.pdf>)
+//! that uses bivariate KZG 
 //!
 //! The batch KZG evaluation tech is from BDFG20 <https://eprint.iacr.org/2020/081.pdf>
 //!
-//! Mercury and HyperKZG share the same types of commitment key and engine.
-//!
-//! Samaritan presents a similar construction and achieves the same performance, see <https://eprint.iacr.org/2025/419.pdf>.
-
-// for univariate batched KZG take only the first column with j = 0
-// fij mozno transpose
+//! Chopin reuses the bivariate KZG commitment key and engine types.
 
 use std::{cmp::max, marker::PhantomData};
 
@@ -98,14 +89,15 @@ where
 
   comm_d: Commitment<E>,
 
-  ///!This is public just so that it is accessible in the tests  
+  /// !This is public only to make it accessible in the tests  
   /// Bivariate KZG opening proof: [q1(tau, sigma)]_1 where q1(X, Y) = (f(X, Y) - f(alpha, Y)) / (X - alpha)
   pub pi_1: <<E as Engine>::GE as DlogGroup>::AffineGroupElement,
 
-  /// Bivariate KZG opening proof: [q2(sigma)]_1 where q2(Y) = q2(Y) = (f(alpha, Y) - f(alpha, beta)) / (Y - beta)
+  /// Bivariate KZG opening proof: [q2(sigma)]_1 where q2(Y) = (f(alpha, Y) - f(alpha, beta)) / (Y - beta)
   pub pi_2: <<E as Engine>::GE as DlogGroup>::AffineGroupElement,
 
   comm_w: Commitment<E>,
+  
   comm_w_prime: Commitment<E>,
 
   #[serde_as(as = "EvmCompatSerde")]
@@ -812,7 +804,7 @@ where
   type VerifierKey = VerifierKey<E>;
   type EvaluationArgument = EvaluationArgument<E>;
 
-  /// Reuse the setup from hyperkzg
+  /// Reuse setup from bivariate KZG
   fn setup(
     ck: &<<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey,
   ) -> Result<(Self::ProverKey, Self::VerifierKey), NovaError> {
@@ -1328,7 +1320,7 @@ where
       transcript,
     )?;
 
-    // Check Pairing of 3. and 4.
+    // Final pairing check for the batched univariate opening.
     transcript.absorb(LABEL_W_PRIME, &[arg.comm_w_prime].to_vec().as_slice());
     // TODO: Consider removing D entirely
     let _d = transcript.squeeze(LABEL_PAIRING_D)?;
