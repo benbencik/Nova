@@ -306,28 +306,6 @@ impl<Scalar: PrimeField> UniPoly<Scalar> {
   }
 }
 
-/// Transpose coefficients from [row * num_cols + col] into [col * num_rows + row]
-#[inline]
-fn transpose_coeffs<Scalar: PrimeField>(
-  coeffs: &[Scalar],
-  num_rows: usize,
-  num_cols: usize,
-) -> Vec<Scalar> {
-  assert_eq!(
-    coeffs.len(),
-    num_rows * num_cols,
-    "Number of coefficients must match num_rows * num_cols"
-  );
-
-  (0..num_rows * num_cols)
-    .map(|k| {
-      let col = k / num_rows;
-      let row = k % num_rows;
-      coeffs[row * num_cols + col]
-    })
-    .collect()
-}
-
 // f(X) / (X^{num_cols} - alpha)
 // returns the quotient and the remainder polynomial
 // See Mercury 5. Univariate division
@@ -1133,18 +1111,16 @@ where
 
     // * 11. Mercury Section 6. Step 4. (d) bivariate opening proof pi
     let (pi_1, pi_2) = {
-      // Transpose: transposed[j * b + i] = f_poly[i * b + j]
-      let transposed = transpose_coeffs(&f_poly, b, b);
-
-      // Build bivariate quotients using the full bivariate SRS key ck
-      let biv_point = [alpha, zeta];
+      // Swap evaluation points instead of evaluating at (alpha, zeta), evaluate at (zeta, alpha)
+      // This avoids the matrix transpose
+      let biv_point = [zeta, alpha];
       let biv_arg = bivariatekzg::EvaluationEngine::<E>::prove(
         ck,
         &bivariatekzg::ProverKey::default(),
         transcript,
         // Commitment is just a placeholder; bivariate prove() only uses ck and hat_P
         &Commitment::<E>::new(E::GE::zero()),
-        &transposed,
+        &f_poly,
         &biv_point,
         &g_zeta,
       )?;
@@ -1317,8 +1293,9 @@ where
 
     // Bivariate opening check for f(alpha, zeta) = g_zeta.
     // This delegates to bivariatekzg's native verifier equation.
+    // Swap evaluation points to match the prover: evaluate at (zeta, alpha) instead of (alpha, zeta)
     let biv_arg = bivariatekzg::EvaluationArgument::<E>::new(arg.pi_1, arg.pi_2);
-    let biv_point = [alpha, zeta];
+    let biv_point = [zeta, alpha];
     bivariatekzg::EvaluationEngine::<E>::verify(
       vk,
       transcript,
@@ -1390,16 +1367,6 @@ mod tests {
   type E = Bn256EngineBivariateKZG;
   type EE = super::EvaluationEngine<E>;
 
-  fn padded_transpose(coeffs: &[F], log_n: usize) -> Vec<F> {
-    let padded_log_n = if log_n % 2 == 1 { log_n + 1 } else { log_n };
-    let b = 1 << (padded_log_n / 2);
-
-    let mut padded = coeffs.to_vec();
-    padded.resize(b * b, F::ZERO);
-
-    super::transpose_coeffs(&padded, b, b)
-  }
-
   fn prove_and_verify(log_n: usize) {
     use crate::provider::traits::DlogGroup;
 
@@ -1423,15 +1390,19 @@ mod tests {
 
     let mut transcript = <E as Engine>::TE::new(b"test");
 
-    let comm_coeffs = padded_transpose(&poly.coeffs, log_n);
-    let comm = <E as Engine>::CE::commit(&ck, &comm_coeffs, &F::ZERO);
+    // Pad coefficients to square matrix size
+    let padded_log_n = if log_n % 2 == 1 { log_n + 1 } else { log_n };
+    let b = 1 << (padded_log_n / 2);
+    let mut padded = poly.coeffs.clone();
+    padded.resize(b * b, F::ZERO);
+    let comm = <E as Engine>::CE::commit(&ck, &padded, &F::ZERO);
 
     let arg = EE::prove(
       &ck,
       &pk,
       &mut transcript,
       &comm,
-      &poly.coeffs,
+      &padded,
       &point,
       &eval,
     )
@@ -1466,8 +1437,23 @@ mod tests {
   }
 
   #[test]
-  fn test_chopin_evaluation_engine_15() {
-    prove_and_verify(15);
+  fn test_chopin_evaluation_engine_8() {
+    prove_and_verify(8);
+  }
+
+  #[test]
+  fn test_chopin_evaluation_engine_10() {
+    prove_and_verify(10);
+  }
+
+  #[test]
+  fn test_chopin_evaluation_engine_12() {
+    prove_and_verify(12);
+  }
+
+  #[test]
+  fn test_chopin_evaluation_engine_14() {
+    prove_and_verify(14);
   }
 
   #[test]
