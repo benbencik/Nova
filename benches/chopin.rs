@@ -15,24 +15,8 @@ type E = Bn256EngineBivariateKZG;
 type F = halo2curves::bn256::Fr;
 type EE = nova_snark::provider::chopin::EvaluationEngine<E>;
 
-const SIZES: &[usize] = &[6, 8, 10, 12, 14, 16, 18];
-const NUM_ITERATIONS: usize = 1;
-
-fn padded_transpose(coeffs: &[F], log_n: usize) -> Vec<F> {
-  let padded_log_n = if log_n % 2 == 1 { log_n + 1 } else { log_n };
-  let b = 1 << (padded_log_n / 2);
-
-  let mut padded = coeffs.to_vec();
-  padded.resize(b * b, F::ZERO);
-
-  (0..b * b)
-    .map(|k| {
-      let col = k / b;
-      let row = k % b;
-      padded[row * b + col]
-    })
-    .collect()
-}
+const SIZES: &[usize] = &[8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18];
+const NUM_ITERATIONS: usize = 5;
 
 fn main() {
   println!("Chopin Benchmark");
@@ -44,7 +28,12 @@ fn main() {
 
   for &log_n in SIZES.iter() {
     let n = 1 << log_n;
-    println!("Running benchmarks for log_n = {}, n = {}", log_n, n);
+    let setup_n = if log_n % 2 == 1 { 1 << (log_n + 1) } else { n };
+    let ck = <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey::setup_from_rng(
+      b"test", setup_n, OsRng,
+    );
+    
+    println!("\nRunning benchmarks for log_n = {}, n = {}", log_n, n);
 
     let mut prover_total_times = Vec::new();
     let mut division_times = Vec::new();
@@ -55,29 +44,33 @@ fn main() {
     let mut g_times = Vec::new();
     let mut h_times = Vec::new();
     let mut batch_times = Vec::new();
+
     for _ in 0..NUM_ITERATIONS {
-      // println!("  Iteration {}/{}", iteration + 1, NUM_ITERATIONS);
-
-      let poly: Vec<F> = (0..n).into_par_iter().map(|_| F::random(OsRng)).collect();
-      let point: Vec<F> = (0..log_n).map(|_| F::random(OsRng)).collect();
-
-      let setup_n = if log_n % 2 == 1 { 1 << (log_n + 1) } else { n };
-      let ck = <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey::setup_from_rng(
-        b"chopin_bench",
-        setup_n,
-        OsRng,
-      );
+      let poly_coeffs = (0..n)
+        .into_par_iter()
+        .map(|_| F::random(OsRng))
+        .collect::<Vec<_>>();
+      let point = (0..log_n).map(|_| F::random(OsRng)).collect::<Vec<_>>();
 
       let (pk, vk) = EE::setup(&ck).unwrap();
 
-      let eval = MultilinearPolynomial::new(poly.clone()).evaluate(&point);
-      let comm_coeffs = padded_transpose(&poly, log_n);
-      let comm = <E as Engine>::CE::commit(&ck, &comm_coeffs, &F::ZERO);
+      let eval = MultilinearPolynomial::new(poly_coeffs.clone()).evaluate(&point);
+
+      let comm = <E as Engine>::CE::commit(&ck, &poly_coeffs, &F::ZERO);
 
       // prover --------------------------------------------------------
       let start = Instant::now();
       let mut transcript = <E as Engine>::TE::new(b"chopin_bench");
-      let arg = EE::prove(&ck, &pk, &mut transcript, &comm, &poly, &point, &eval).unwrap();
+      let arg = EE::prove(
+        &ck,
+        &pk,
+        &mut transcript,
+        &comm,
+        &poly_coeffs,
+        &point,
+        &eval,
+      )
+      .unwrap();
       let prover_time = start.elapsed();
 
       // verifier ------------------------------------------------------
@@ -123,16 +116,18 @@ fn main() {
 
     prover_results.push((log_n, n, prover_avg, division_avg, division_pct));
     verifier_results.push((log_n, n, verifier_avg, pairing_avg, pairing_pct));
+    println!("Prover Results: {:?}", prover_avg);
   }
 
   save_commitment_timings(&commitment_timings);
-  // save_verifier_results(&verifier_results);
-  // save_commitment_timings(&commitment_timings);
-  // println!("Results saved to mercury_prover_results.csv, mercury_verifier_results.csv, and mercury_commitment_timings.csv");
+  save_prover_time(&commitment_timings); 
 }
 
-fn save_commitment_timings(results: &[(usize, usize, f64, f64, f64, f64, f64, f64, f64, f64, f64)]) {
-  let mut file = File::create("mercury_commitment_timings.csv")
+#[allow(dead_code)]
+fn save_commitment_timings(
+  results: &[(usize, usize, f64, f64, f64, f64, f64, f64, f64, f64, f64)],
+) {
+  let mut file = File::create("chopin_commitment_timings.csv")
     .expect("Failed to create commitment timings file");
 
   writeln!(file, "log_n,n,total_prover_ms,commit_pi_ms,commit_g_ms,commit_h_ms,commit_batch_proof_ms,commit_pi_pct,commit_g_pct,commit_h_pct,commit_batch_proof_pct")
@@ -148,40 +143,22 @@ fn save_commitment_timings(results: &[(usize, usize, f64, f64, f64, f64, f64, f6
   }
 }
 
+#[allow(dead_code)]
+fn save_prover_time(
+  results: &[(usize, usize, f64, f64, f64, f64, f64, f64, f64, f64, f64)],
+) {
+  let mut file = File::create("chopin_prover_times.csv")
+    .expect("Failed to create prover times file");
 
-// fn save_prover_results(results: &[(usize, usize, f64, f64, f64)]) {
-//   let mut file =
-//     File::create("mercury_prover_results.csv").expect("Failed to create prover results file");
+  writeln!(file, "log_n,n,total_prover_ms,commit_pi_ms")
+    .expect("Failed to write header");
 
-//   writeln!(
-//     file,
-//     "log_n,n,total_time_ms,division_time_ms,division_percentage"
-//   )
-//   .expect("Failed to write header");
-
-//   for (log_n, n, total_time, division_time, division_pct) in results {
-//     writeln!(
-//       file,
-//       "{},{},{:.4},{:.4},{:.2}",
-//       log_n, n, total_time, division_time, division_pct
-//     )
-//     .expect("Failed to write prover result");
-//   }
-// }
-
-// fn save_verifier_results(results: &[(usize, usize, f64, f64, f64)]) {
-//   let mut file = File::create("mercury_verifier_results.csv")
-//     .expect("Failed to create verifier results file");
-
-//   writeln!(file, "log_n,n,total_time_ms,pairing_time_ms,pairing_percentage")
-//     .expect("Failed to write header");
-
-//   for (log_n, n, total_time, pairing_time, pairing_pct) in results {
-//     writeln!(
-//       file,
-//       "{},{},{:.4},{:.4},{:.2}",
-//       log_n, n, total_time, pairing_time, pairing_pct
-//     )
-//     .expect("Failed to write verifier result");
-//   }
-// }
+  for (log_n, n, total, pi, g, h, batch, pi_pct, g_pct, h_pct, batch_pct) in results {
+    writeln!(
+      file,
+      "{},{},{:.4},{:.4}",
+      log_n, n, total, pi
+    )
+    .expect("Failed to write prover time result");
+  }
+}

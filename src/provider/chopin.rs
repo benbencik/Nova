@@ -1379,6 +1379,7 @@ mod tests {
     };
     let point = (0..log_n).map(|_| F::random(OsRng)).collect::<Vec<_>>();
 
+    // TODO: implementation of KZG requires perfect square (consider if this is necessary)
     let setup_n = if log_n % 2 == 1 { 1 << (log_n + 1) } else { n };
     let ck = <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey::setup_from_rng(
       b"test", setup_n, OsRng,
@@ -1388,21 +1389,15 @@ mod tests {
 
     let eval = MultilinearPolynomial::new(poly.coeffs.clone()).evaluate(&point);
 
+    let comm = <E as Engine>::CE::commit(&ck, &poly.coeffs, &F::ZERO);
+
     let mut transcript = <E as Engine>::TE::new(b"test");
-
-    // Pad coefficients to square matrix size
-    let padded_log_n = if log_n % 2 == 1 { log_n + 1 } else { log_n };
-    let b = 1 << (padded_log_n / 2);
-    let mut padded = poly.coeffs.clone();
-    padded.resize(b * b, F::ZERO);
-    let comm = <E as Engine>::CE::commit(&ck, &padded, &F::ZERO);
-
     let arg = EE::prove(
       &ck,
       &pk,
       &mut transcript,
       &comm,
-      &padded,
+      &poly.coeffs,
       &point,
       &eval,
     )
@@ -1437,27 +1432,9 @@ mod tests {
   }
 
   #[test]
-  fn test_chopin_evaluation_engine_8() {
-    prove_and_verify(8);
-  }
-
-  #[test]
-  fn test_chopin_evaluation_engine_10() {
-    prove_and_verify(10);
-  }
-
-  #[test]
-  fn test_chopin_evaluation_engine_12() {
-    prove_and_verify(12);
-  }
-
-  #[test]
-  fn test_chopin_evaluation_engine_14() {
-    prove_and_verify(14);
-  }
-
-  #[test]
-  fn test_chopin_evaluation_engine_16() {
-    prove_and_verify(16);
+  fn test_chopin_evaluation_engine() {
+    for log_n in 6..=16 {
+      prove_and_verify(log_n);
+    }
   }
 }
