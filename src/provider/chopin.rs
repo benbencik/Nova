@@ -1348,8 +1348,23 @@ mod tests {
   }
 
   #[test]
-  fn test_chopin_evaluation_engine_15() {
-    prove_and_verify(15);
+  fn test_chopin_evaluation_engine_8() {
+    prove_and_verify(8);
+  }
+
+  #[test]
+  fn test_chopin_evaluation_engine_10() {
+    prove_and_verify(10);
+  }
+
+  #[test]
+  fn test_chopin_evaluation_engine_12() {
+    prove_and_verify(12);
+  }
+
+  #[test]
+  fn test_chopin_evaluation_engine_14() {
+    prove_and_verify(14);
   }
 
   #[test]
