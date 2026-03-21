@@ -348,7 +348,11 @@ where
   pub fn setup_from_rng(label: &'static [u8], n: usize, mut rng: impl rand_core::RngCore) -> Self {
     use num_integer::Roots;
 
-    let num_gens = n.next_power_of_two();
+    let mut num_gens = n.next_power_of_two();
+    if num_gens % 2 == 1 {
+      num_gens <<= 1;
+    }
+
     let b: usize = num_gens.sqrt();
     assert_eq!(b * b, num_gens, "num_gens must be a perfect square");
 
