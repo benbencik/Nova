@@ -15,8 +15,8 @@ type E = Bn256EngineBivariateKZG;
 type F = halo2curves::bn256::Fr;
 type EE = nova_snark::provider::chopin::EvaluationEngine<E>;
 
-const SIZES: &[usize] = &[8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18];
-const NUM_ITERATIONS: usize = 5;
+const SIZES: &[usize] = &[23, 24, 25];
+const NUM_ITERATIONS: usize = 1;
 
 fn main() {
   println!("Chopin Benchmark");
@@ -114,13 +114,14 @@ fn main() {
       log_n, n, prover_avg, pi_avg, g_avg, h_avg, batch_avg, pi_pct, g_pct, h_pct, batch_pct,
     ));
 
+    println!("Prover Avg: {}", prover_avg);
     prover_results.push((log_n, n, prover_avg, division_avg, division_pct));
     verifier_results.push((log_n, n, verifier_avg, pairing_avg, pairing_pct));
     println!("Prover Results: {:?}", prover_avg);
   }
 
-  save_commitment_timings(&commitment_timings);
-  save_prover_time(&commitment_timings); 
+  // save_commitment_timings(&commitment_timings);
+  // save_prover_time(&commitment_timings); 
 }
 
 #[allow(dead_code)]

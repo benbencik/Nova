@@ -360,6 +360,7 @@ where
   /// Since the caller (or anyone with access to the RNG state) knows tau and sigma, this is insecure.
   pub fn setup_from_rng(label: &'static [u8], n: usize, mut rng: impl rand_core::RngCore) -> Self {
     use num_integer::Roots;
+    const PAR_POWERS_THRESHOLD: usize = 1 << 16;
 
     let mut num_gens = n.next_power_of_two();
     if num_gens % 2 == 1 {
@@ -372,8 +373,17 @@ where
     let tau = E::Scalar::random(&mut rng);
     let sigma = E::Scalar::random(&mut rng);
 
-    let powers_of_tau = Self::compute_powers_serial(tau, b);
-    let powers_of_sigma = Self::compute_powers_serial(sigma, b);
+    let powers_of_tau = if b < PAR_POWERS_THRESHOLD {
+      Self::compute_powers_serial(tau, b)
+    } else {
+      Self::compute_powers_par(tau, b)
+    };
+    
+    let powers_of_sigma = if b < PAR_POWERS_THRESHOLD {
+      Self::compute_powers_serial(sigma, b)
+    } else {
+      Self::compute_powers_par(sigma, b)
+    };
 
     Self::setup_from_tau_sigma_direct(label, &powers_of_tau, &powers_of_sigma, tau, sigma)
   }
@@ -423,9 +433,22 @@ where
     powers_of_tau
   }
 
-  #[allow(unused, unreachable_code)]
-  fn compute_powers_par(_tau: E::Scalar, _n: usize) -> Vec<E::Scalar> {
-    !unimplemented!("use just serial version, setup is not included in benchmarks");
+  fn compute_powers_par(tau: E::Scalar, n: usize) -> Vec<E::Scalar> {
+    let num_threads = rayon::current_num_threads();
+    (0..n)
+      .collect::<Vec<_>>()
+      .par_chunks(std::cmp::max(n / num_threads, 1))
+      .into_par_iter()
+      .map(|sub_list| {
+        let mut res = Vec::with_capacity(sub_list.len());
+        res.push(tau.pow([sub_list[0] as u64]));
+        for i in 1..sub_list.len() {
+          res.push(res[i - 1] * tau);
+        }
+        res
+      })
+      .flatten()
+      .collect::<Vec<_>>()
   }
 }
 
