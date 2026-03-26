@@ -80,6 +80,15 @@ harness = false
 name = "sumcheckeq"
 harness = false
 
+[[bench]]
+name = "chopin"
+harness = false
+
+[[bench]]
+name = "mercury"
+harness = false
+required-features = ["test-utils"]
+
 [[example]]
 name = "ptau_test_setup"
 required-features = ["test-utils", "io"]

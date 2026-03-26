@@ -8,6 +8,7 @@ use crate::{
   errors::NovaError,
   gadgets::utils::to_bignat_repr,
   provider::{
+    chopin::ChopinTiming,
     msm::batch_add,
     traits::{DlogGroup, DlogGroupExt, PairingGroup},
   },
@@ -31,6 +32,7 @@ use rand_core::OsRng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+use std::time::Instant;
 
 /// Alias to points on G1 that are in preprocessed form
 type G1Affine<E> = <<E as Engine>::GE as DlogGroup>::AffineGroupElement;
@@ -789,6 +791,7 @@ where
     // f(alpha, beta) = eval of f(alpha, Y) at Y = beta
 
     let q2_coeffs = divide_by_linear(&f_alpha_Y, beta);
+    let commit_pi_start = Instant::now();
     let (pi1, pi2) = rayon::join(
       || {
         E::CE::commit(ck, &q1_coeffs, &E::Scalar::ZERO)
@@ -804,6 +807,7 @@ where
         E::GE::vartime_multiscalar_mul(&q2_coeffs, &bases).affine()
       },
     );
+    ChopinTiming::set_commit_pi(commit_pi_start.elapsed().as_secs_f64() * 1000.0);
     Ok(EvaluationArgument { pi1, pi2 })
   }
 

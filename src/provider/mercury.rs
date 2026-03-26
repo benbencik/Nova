@@ -11,7 +11,7 @@
 //!
 //! Samaritan presents a similar construction and achieves the same performance, see <https://eprint.iacr.org/2025/419.pdf>.
 
-use std::{cmp::max, marker::PhantomData};
+use std::{cmp::max, marker::PhantomData, sync::Mutex, time::Instant};
 
 use ff::{Field, PrimeField};
 use halo2curves::fft::best_fft;
@@ -40,6 +40,109 @@ use crate::{
     TranscriptEngineTrait,
   },
 };
+
+#[derive(Debug, Clone, Copy)]
+/// measurements for benchmarks
+pub struct MercuryTiming {
+  /// time spent in divide_by_binomial operation (milliseconds)
+  pub gq_poly_construction_ms: f64,
+  /// time spent in pairing operations (milliseconds)
+  pub pairing_operations_ms: f64,
+  /// time spent committing q (milliseconds)
+  pub commit_q_ms: f64,
+  /// time spent committing g (milliseconds)
+  pub commit_g_ms: f64,
+  /// time spent committing h (milliseconds)
+  pub commit_h_ms: f64,
+  /// time spent committing s (milliseconds)
+  pub commit_s_ms: f64,
+  /// time spent committing d (milliseconds)
+  pub commit_d_ms: f64,
+  /// time spent committing quot_f (milliseconds)
+  pub commit_quot_f_ms: f64,
+  /// time spent committing batch proof (w') (milliseconds)
+  pub commit_batch_proof_ms: f64,
+}
+
+/// global timing measurements
+static MERCURY_TIMINGS: Mutex<MercuryTiming> = Mutex::new(MercuryTiming {
+  gq_poly_construction_ms: 0.0,
+  pairing_operations_ms: 0.0,
+  commit_q_ms: 0.0,
+  commit_g_ms: 0.0,
+  commit_h_ms: 0.0,
+  commit_s_ms: 0.0,
+  commit_d_ms: 0.0,
+  commit_quot_f_ms: 0.0,
+  commit_batch_proof_ms: 0.0,
+});
+
+impl MercuryTiming {
+  /// get the current timing measurements
+  pub fn get() -> Self {
+    *MERCURY_TIMINGS.lock().unwrap()
+  }
+
+  /// reset all timing measurements to 0
+  pub fn reset() {
+    *MERCURY_TIMINGS.lock().unwrap() = MercuryTiming {
+      gq_poly_construction_ms: 0.0,
+      pairing_operations_ms: 0.0,
+      commit_q_ms: 0.0,
+      commit_g_ms: 0.0,
+      commit_h_ms: 0.0,
+      commit_s_ms: 0.0,
+      commit_d_ms: 0.0,
+      commit_quot_f_ms: 0.0,
+      commit_batch_proof_ms: 0.0,
+    };
+  }
+
+  /// set timing
+  pub fn set_gq_poly_construction(ms: f64) {
+    MERCURY_TIMINGS.lock().unwrap().gq_poly_construction_ms = ms;
+  }
+
+  /// set timing
+  pub fn set_pairing_operations(ms: f64) {
+    MERCURY_TIMINGS.lock().unwrap().pairing_operations_ms = ms;
+  }
+
+  /// set timing
+  pub fn set_commit_q(ms: f64) {
+    MERCURY_TIMINGS.lock().unwrap().commit_q_ms = ms;
+  }
+
+  /// set timing
+  pub fn set_commit_g(ms: f64) {
+    MERCURY_TIMINGS.lock().unwrap().commit_g_ms = ms;
+  }
+
+  /// set timing
+  pub fn set_commit_h(ms: f64) {
+    MERCURY_TIMINGS.lock().unwrap().commit_h_ms = ms;
+  }
+
+  /// set timing
+  pub fn set_commit_s(ms: f64) {
+    MERCURY_TIMINGS.lock().unwrap().commit_s_ms = ms;
+  }
+
+  /// set timing
+  pub fn set_commit_d(ms: f64) {
+    MERCURY_TIMINGS.lock().unwrap().commit_d_ms = ms;
+  }
+
+  /// set timing
+  pub fn set_commit_quot_f(ms: f64) {
+    MERCURY_TIMINGS.lock().unwrap().commit_quot_f_ms = ms;
+  }
+
+  /// set timing
+  pub fn set_commit_batch_proof(ms: f64) {
+    MERCURY_TIMINGS.lock().unwrap().commit_batch_proof_ms = ms;
+  }
+}
 
 // Transcript absorb/squeeze labels used by both prover and verifier
 mod transcript_labels {
@@ -480,6 +583,8 @@ mod batch_evaluation {
   {
     use super::batch_evaluation::*;
     use super::transcript_labels::*;
+    use crate::provider::mercury::MercuryTiming;
+    use std::time::Instant;
 
     let zeta = data.evals.zeta;
     let zeta_inv = data.evals.zeta_inv;
@@ -667,7 +772,9 @@ mod batch_evaluation {
     };
 
     // W'(X) = quot_l(X)
+    let commit_batch_start = Instant::now();
     let comm_w_prime = E::CE::commit(ck, &quot_l_poly.coeffs, &E::Scalar::ZERO);
+    MercuryTiming::set_commit_batch_proof(commit_batch_start.elapsed().as_secs_f64() * 1000.0);
 
     Ok(BatchArg {
       comm_w,
@@ -883,7 +990,9 @@ where
     }
 
     // * 2. Mercury Section 6. Step 1. (b)
+    let commit_h_start = Instant::now();
     let comm_h = E::CE::commit(ck, &h_poly.coeffs, &E::Scalar::ZERO);
+    MercuryTiming::set_commit_h(commit_h_start.elapsed().as_secs_f64() * 1000.0);
     transcript.absorb(LABEL_H, &[comm_h].to_vec().as_slice());
 
     // * 3. Mercury Section 6. Step 2. (a)
@@ -891,7 +1000,11 @@ where
 
     // * 4. Mercury Section 6. Step 2. (b)
     // Compute q(X) and g(X)
+    let gq_poly_construction_start = Instant::now();
     let (mut q_poly, g_poly) = divide_by_binomial(&f_poly, b, b, &alpha);
+    MercuryTiming::set_gq_poly_construction(
+      gq_poly_construction_start.elapsed().as_secs_f64() * 1000.0,
+    );
 
     q_poly.trim();
 
@@ -942,10 +1055,20 @@ where
 
     // * 5. Mercury Section 6. Step 2. (c)
     // * Main Cost (Prover) I: MSM of O(N)
-    let (comm_q, comm_g) = rayon::join(
-      || E::CE::commit(ck, &q_poly.coeffs, &E::Scalar::ZERO),
-      || E::CE::commit(ck, &g_poly.coeffs, &E::Scalar::ZERO),
+    let ((comm_q, commit_q_ms), (comm_g, commit_g_ms)) = rayon::join(
+      || {
+        let commit_q_start = Instant::now();
+        let comm_q = E::CE::commit(ck, &q_poly.coeffs, &E::Scalar::ZERO);
+        (comm_q, commit_q_start.elapsed().as_secs_f64() * 1000.0)
+      },
+      || {
+        let commit_g_start = Instant::now();
+        let comm_g = E::CE::commit(ck, &g_poly.coeffs, &E::Scalar::ZERO);
+        (comm_g, commit_g_start.elapsed().as_secs_f64() * 1000.0)
+      },
     );
+    MercuryTiming::set_commit_q(commit_q_ms);
+    MercuryTiming::set_commit_g(commit_g_ms);
     transcript.absorb(LABEL_Q, &[comm_q].to_vec().as_slice());
     transcript.absorb(LABEL_G, &[comm_g].to_vec().as_slice());
 
@@ -1019,10 +1142,20 @@ where
     };
 
     // * Send commitments of 7. and 8.
-    let (comm_s, comm_d) = rayon::join(
-      || E::CE::commit(ck, &s_poly.coeffs, &E::Scalar::ZERO),
-      || E::CE::commit(ck, &d_poly.coeffs, &E::Scalar::ZERO),
+    let ((comm_s, commit_s_ms), (comm_d, commit_d_ms)) = rayon::join(
+      || {
+        let commit_s_start = Instant::now();
+        let comm_s = E::CE::commit(ck, &s_poly.coeffs, &E::Scalar::ZERO);
+        (comm_s, commit_s_start.elapsed().as_secs_f64() * 1000.0)
+      },
+      || {
+        let commit_d_start = Instant::now();
+        let comm_d = E::CE::commit(ck, &d_poly.coeffs, &E::Scalar::ZERO);
+        (comm_d, commit_d_start.elapsed().as_secs_f64() * 1000.0)
+      },
     );
+    MercuryTiming::set_commit_s(commit_s_ms);
+    MercuryTiming::set_commit_d(commit_d_ms);
 
     transcript.absorb(LABEL_S, &[comm_s].to_vec().as_slice());
     transcript.absorb(LABEL_D, &[comm_d].to_vec().as_slice());
@@ -1111,7 +1244,10 @@ where
       let mut quot_f = quot_f;
       quot_f.coeffs.truncate(original_size);
       quot_f.trim();
-      E::CE::commit(ck, &quot_f.coeffs, &E::Scalar::ZERO)
+      let commit_quot_f_start = Instant::now();
+      let comm_quot_f = E::CE::commit(ck, &quot_f.coeffs, &E::Scalar::ZERO);
+      MercuryTiming::set_commit_quot_f(commit_quot_f_start.elapsed().as_secs_f64() * 1000.0);
+      comm_quot_f
     };
     transcript.absorb(LABEL_QUOT_F, &[comm_quot_f].to_vec().as_slice());
 
@@ -1290,6 +1426,8 @@ where
     let lr = g2;
     let rr = tau2;
 
+    let pairing_start = Instant::now();
+
     // * Check f(X) / (X^b - alpha) = (q(X), g(x))
     // * 5. Adapted from Mercury Section 6. Step 4. (f)
     // The pairing check in Step 4. (f) is
@@ -1373,6 +1511,7 @@ where
 
     let pairing_l = E::GE::pairing(&ll.into_inner(), &lr);
     let pairing_r = E::GE::pairing(&rl.into_inner(), &rr);
+    MercuryTiming::set_pairing_operations(pairing_start.elapsed().as_secs_f64() * 1000.0);
 
     if pairing_l != pairing_r {
       return Err(NovaError::ProofVerifyError {
