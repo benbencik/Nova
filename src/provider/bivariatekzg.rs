@@ -3,7 +3,7 @@
 
 #![allow(non_snake_case)]
 #[cfg(feature = "io")]
-use crate::provider::ptau::PtauFileError;
+use crate::provider::{ptau::PtauFileError, read_ptau, write_ptau};
 use crate::{
   errors::NovaError,
   gadgets::utils::to_bignat_repr,
@@ -57,6 +57,17 @@ impl<E: Engine> CommitmentKey<E>
 where
   E::GE: PairingGroup,
 {
+  fn matrix_dims(num_gens: usize) -> (usize, usize) {
+    assert!(num_gens.is_power_of_two());
+    // split 2^n into 2^{floor(k/2)} * 2^{ceil(k/2)}
+    let log_num_gens = num_gens.trailing_zeros() as usize;
+    let log_rows = log_num_gens / 2;
+    let log_cols = log_num_gens - log_rows;
+    let num_rows = 1 << log_rows;
+    let num_cols = 1 << log_cols;
+    (num_rows, num_cols)
+  }
+
   /// Create a new commitment key
   pub fn new(
     ck: Vec<<E::GE as DlogGroup>::AffineGroupElement>,
@@ -94,8 +105,11 @@ where
 
   /// Returns a slice of SRS: tau^0*sigma^0, tau^1*sigma^0, ..., tau^{b-1}*sigma^0
   /// used for all univariate KZG commitments
-  pub(crate) fn uni_commit_key(&self, b: usize) -> &[<E::GE as DlogGroup>::AffineGroupElement] {
-    &self.ck[..b]
+  pub(crate) fn uni_commit_key(
+    &self,
+    num_cols: usize,
+  ) -> &[<E::GE as DlogGroup>::AffineGroupElement] {
+    &self.ck[..num_cols]
   }
 
   /// Returns the coordinates of the generator points.
@@ -346,32 +360,32 @@ where
   /// This generates a commitment key with independent random tau and sigma.
   /// Since the caller (or anyone with access to the RNG state) knows tau and sigma, this is insecure.
   pub fn setup_from_rng(label: &'static [u8], n: usize, mut rng: impl rand_core::RngCore) -> Self {
-    use num_integer::Roots;
     const PAR_POWERS_THRESHOLD: usize = 1 << 16;
 
-    let mut num_gens = n.next_power_of_two();
-    if num_gens % 2 == 1 {
-      num_gens <<= 1;
-    }
-
-    let b: usize = num_gens.sqrt();
-    assert_eq!(b * b, num_gens, "num_gens must be a perfect square");
+    let num_gens = n.next_power_of_two();
+    let (num_rows, num_cols) = Self::matrix_dims(num_gens);
 
     let tau = E::Scalar::random(&mut rng);
     let sigma = E::Scalar::random(&mut rng);
 
-    let (powers_of_tau, powers_of_sigma) = if b > PAR_POWERS_THRESHOLD {
-      (Self::compute_powers_par(tau, b), Self::compute_powers_par(sigma, b))
+    let (powers_of_tau, powers_of_sigma) = if num_cols > PAR_POWERS_THRESHOLD {
+      (
+        Self::compute_powers_par(tau, num_cols),
+        Self::compute_powers_par(sigma, num_rows),
+      )
     } else {
-      (Self::compute_powers_serial(tau, b), Self::compute_powers_serial(sigma, b))
+      (
+        Self::compute_powers_serial(tau, num_cols),
+        Self::compute_powers_serial(sigma, num_rows),
+      )
     };
 
     Self::setup_from_tau_sigma_direct(label, &powers_of_tau, &powers_of_sigma, tau, sigma)
   }
 
   /// Build key from independent powers of tau and sigma
-  /// Produces ck of size b^2 with column-major layout:
-  /// ck[j*b + i] = G1 * (tau^i * sigma^j)
+  /// Produces ck of size num_rows * num_cols:
+  /// ck[j*num_cols + i] = G1 * (tau^i * sigma^j)
   fn setup_from_tau_sigma_direct(
     label: &'static [u8],
     powers_of_tau: &[E::Scalar],
@@ -379,15 +393,15 @@ where
     tau: E::Scalar,
     sigma: E::Scalar,
   ) -> Self {
-    let b = powers_of_tau.len();
-    assert_eq!(b, powers_of_sigma.len());
+    let num_cols = powers_of_tau.len();
+    let num_rows = powers_of_sigma.len();
 
     // Build SRS tau^i x sigma^j
-    let ck: Vec<G1Affine<E>> = (0..b * b)
+    let ck: Vec<G1Affine<E>> = (0..num_rows * num_cols)
       .into_par_iter()
       .map(|k| {
-        let i = k % b; // X index
-        let j = k / b; // Y index
+        let i = k % num_cols; // X index
+        let j = k / num_cols; // Y index
         (<E::GE as DlogGroup>::gen() * (powers_of_tau[i] * powers_of_sigma[j])).affine()
       })
       .collect();
@@ -451,7 +465,7 @@ where
   /// # Security Warning
   ///
   /// This method generates an **insecure** commitment key using a random tau.
-  /// The security of HyperKZG relies on no one knowing the secret tau value.
+  /// The security of bivariate KZG relies on no one knowing the secret tau and sigma values.
   ///
   /// **For production use**, call [`PublicParams::setup_with_ptau_dir`] or
   /// [`R1CSShape::commitment_key_from_ptau_dir`] to load commitment keys from
@@ -518,23 +532,42 @@ where
   }
 
   #[cfg(feature = "io")]
-  #[allow(unreachable_code)]
   fn load_setup(
-    _reader: &mut (impl std::io::Read + std::io::Seek),
-    _label: &'static [u8],
-    _n: usize,
+    reader: &mut (impl std::io::Read + std::io::Seek),
+    label: &'static [u8],
+    n: usize,
   ) -> Result<Self::CommitmentKey, PtauFileError> {
-    !unimplemented!("loading from files not needed for benches");
+    let num_gens = n.next_power_of_two();
+
+    let (g1_points, g2_points) = read_ptau(reader, num_gens, 2)?;
+
+    let ck = g1_points.to_vec();
+
+    let tau_H = g2_points[0];
+    let sigma_H = g2_points[1];
+
+    let h = *E::GE::from_label(label, 1).first().unwrap();
+
+    Ok(CommitmentKey {
+      ck,
+      h,
+      tau_H,
+      sigma_H,
+    })
   }
 
   /// Save keys
   #[cfg(feature = "io")]
-  #[allow(unreachable_code)]
   fn save_setup(
-    _ck: &Self::CommitmentKey,
-    mut _writer: &mut (impl std::io::Write + std::io::Seek),
+    ck: &Self::CommitmentKey,
+    mut writer: &mut (impl std::io::Write + std::io::Seek),
   ) -> Result<(), PtauFileError> {
-    !unimplemented!("saving to files not needed for benches");
+    let g1_points = ck.ck.clone();
+
+    let g2_points = vec![ck.tau_H, ck.sigma_H];
+    let power = g1_points.len().next_power_of_two().trailing_zeros() + 1;
+
+    write_ptau(&mut writer, g1_points, g2_points, power)
   }
 
   fn commit_small_range<T: Integer + Into<u64> + Copy + Sync + ToPrimitive>(
@@ -694,7 +727,7 @@ where
 
   /// Prove evaluation of f(alpha, beta)
   /// The polynomial hat_P is interpreted as the coefficients of a bivariate polynomial
-  /// f(X, Y) = Sum_{i,j} f_{i,j} X^i Y^j with hat_P[j*b + i] = f_{i,j}.
+  /// f(X, Y) = Sum_{i,j} f_{i,j} X^i Y^j with hat_P[j*num_cols + i] = f_{i,j}.
   fn prove(
     ck: &CommitmentKey<E>,
     _pk: &Self::ProverKey,
@@ -704,8 +737,6 @@ where
     point: &[E::Scalar],
     _eval: &E::Scalar,
   ) -> Result<Self::EvaluationArgument, NovaError> {
-    use num_integer::Roots;
-
     // bivariate kzg expects evaluation point (alpha, beta)
     if point.len() != 2 {
       return Err(NovaError::InvalidInputLength);
@@ -715,10 +746,7 @@ where
 
     let n = hat_P.len();
     let n_padded = n.next_power_of_two();
-    let b = n_padded.sqrt();
-
-    // TODO: Verify if this assumption also holds for Chopin, so far keep it
-    assert_eq!(b * b, n_padded, "n must be a perfect square");
+    let (num_rows, num_cols) = CommitmentKey::<E>::matrix_dims(n_padded);
 
     // pad polynomial to n_padded if needed
     let f_coeffs: Vec<E::Scalar> = {
@@ -737,20 +765,20 @@ where
     // q1(X, Y) = Sum_j q1_j(X) * Y^j
     // where q1_j(X) = (f_j(X) - f_j(alpha)) / (X - alpha)
 
-    // q1_j(X) has degree (b-2) since f_j(X) has degree (b-1) and we divide by (X - alpha)
+    // q1_j(X) has degree (num_cols-2) since f_j(X) has degree (num_cols-1) and we divide by (X - alpha)
     let mut q1_coeffs = vec![E::Scalar::ZERO; n_padded];
-    let mut f_alpha_Y = vec![E::Scalar::ZERO; b];
+    let mut f_alpha_Y = vec![E::Scalar::ZERO; num_rows];
 
-    for j in 0..b {
+    for j in 0..num_rows {
       // extract f_j(X)
-      let f_j: Vec<E::Scalar> = (0..b).map(|i| f_coeffs[j * b + i]).collect();
+      let f_j: Vec<E::Scalar> = (0..num_cols).map(|i| f_coeffs[j * num_cols + i]).collect();
 
       f_alpha_Y[j] = eval_univariate(&f_j, alpha);
       let q1_j = divide_by_linear(&f_j, alpha);
 
       // store q1_j coefficients
       for (i, &coef) in q1_j.iter().enumerate() {
-        q1_coeffs[j * b + i] = coef;
+        q1_coeffs[j * num_cols + i] = coef;
       }
     }
 
@@ -763,7 +791,7 @@ where
     let q2 = divide_by_linear(&f_alpha_Y, beta);
     let mut q2_coeffs = vec![E::Scalar::ZERO; n_padded];
     for (j, &coef) in q2.iter().enumerate() {
-      q2_coeffs[j * b] = coef;
+      q2_coeffs[j * num_cols] = coef;
     }
 
     let (pi1, pi2) = rayon::join(
@@ -856,24 +884,31 @@ mod tests {
   };
   use rand::SeedableRng;
   #[cfg(feature = "io")]
+  use std::{
+    fs::OpenOptions,
+    io::{BufReader, BufWriter},
+  };
 
   type E = Bn256EngineBivariateKZG;
   type Fr = <E as Engine>::Scalar;
 
   fn bivariate_eval<F: Field>(poly: &[F], x: F, y: F) -> F {
-    use num_integer::Roots;
-
     let n = poly.len();
-    let b = n.sqrt();
+    assert!(n.is_power_of_two());
+    let log_n = n.trailing_zeros() as usize;
+    let log_rows = log_n / 2;
+    let log_cols = log_n - log_rows;
+    let num_rows = 1 << log_rows;
+    let num_cols = 1 << log_cols;
 
     let mut result = F::ZERO;
     let mut y_pow = F::ONE;
 
-    for j in 0..b {
+    for j in 0..num_rows {
       let mut row_eval = F::ZERO;
       let mut x_pow = F::ONE;
-      for i in 0..b {
-        row_eval += poly[j * b + i] * x_pow;
+      for i in 0..num_cols {
+        row_eval += poly[j * num_cols + i] * x_pow;
         x_pow *= x;
       }
       result += row_eval * y_pow;
@@ -1024,7 +1059,7 @@ mod tests {
   #[test]
   fn test_bivariate_kzg_large() {
     // test the hyperkzg prover and verifier with random instances (derived from a seed)
-    for ell in [4, 6, 8] {
+    for ell in [4, 5, 6, 7, 8] {
       let mut rng = rand::rngs::StdRng::seed_from_u64(ell);
       let n = 1 << ell; // n = 2^ell
 
@@ -1059,6 +1094,45 @@ mod tests {
       assert!(
         EvaluationEngine::verify(&vk, &mut verifier_tr2, &C, &point, &eval, &bad_proof).is_err()
       );
+    }
+  }
+
+  #[cfg(feature = "io")]
+  #[test]
+  fn test_save_load_ck() {
+    use crate::provider::bivariatekzg;
+
+    const BUFFER_SIZE: usize = 64 * 1024;
+    const LABEL: &[u8] = b"test";
+
+    let n = 4;
+    let filename = "/tmp/kzg_test.ptau";
+
+    let ck: CommitmentKey<E> = CommitmentEngine::setup(LABEL, n).unwrap();
+
+    let file = OpenOptions::new()
+      .write(true)
+      .create(true)
+      .truncate(true)
+      .open(filename)
+      .unwrap();
+    let mut writer = BufWriter::with_capacity(BUFFER_SIZE, file);
+
+    CommitmentEngine::save_setup(&ck, &mut writer).unwrap();
+
+    let file = OpenOptions::new().read(true).open(filename).unwrap();
+
+    let mut reader = BufReader::new(file);
+
+    let read_ck =
+      bivariatekzg::CommitmentEngine::<E>::load_setup(&mut reader, LABEL, ck.ck.len()).unwrap();
+
+    assert_eq!(ck.ck.len(), read_ck.ck.len());
+    assert_eq!(ck.h, read_ck.h);
+    assert_eq!(ck.tau_H, read_ck.tau_H);
+    assert_eq!(ck.sigma_H, read_ck.sigma_H);
+    for i in 0..ck.ck.len() {
+      assert_eq!(ck.ck[i], read_ck.ck[i]);
     }
   }
 }

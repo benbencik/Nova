@@ -85,6 +85,14 @@ name = "ptau_test_setup"
 required-features = ["test-utils", "io"]
 
 [[example]]
+name = "gen_bivariatekzg_setup"
+required-features = ["test-utils", "io"]
+
+[[example]]
+name = "chopin_load_setup"
+required-features = ["io"]
+
+[[example]]
 name = "ppot_prune"
 required-features = ["io"]
 
