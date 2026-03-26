@@ -25,7 +25,7 @@ macro_rules! timeit {
 }
 
 fn main() {
-  for log_n in 10..12 {
+  for log_n in 20..28 {
     let n = 1 << log_n;
 
     let (ck, gen_dur) = timeit!(|| CommitmentKey::<E>::setup_from_rng(LABEL, n, OsRng));

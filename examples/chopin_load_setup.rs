@@ -23,7 +23,7 @@ const KZG_KEY_DIR: &str = "bivariatekzg-setup";
 const LABEL: &[u8; 4] = b"test";
 
 fn main() {
-  for log_n in 10..12 {
+  for log_n in 10..18 {
     let n = 1 << log_n;
     let path = format!("{KZG_KEY_DIR}/ck_{log_n}");
     let file = OpenOptions::new()
@@ -33,7 +33,7 @@ fn main() {
         panic!("missing setup file at {path}; run bivariatekzg_test_setup first")
       });
     let mut reader = BufReader::new(file);
-    
+
     let poly = (0..n)
       .map(|_| <E as Engine>::Scalar::random(OsRng))
       .collect::<Vec<_>>();
