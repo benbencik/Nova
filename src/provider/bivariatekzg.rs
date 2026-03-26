@@ -788,12 +788,7 @@ where
     // f(alpha, Y) is computed above
     // f(alpha, beta) = eval of f(alpha, Y) at Y = beta
 
-    let q2 = divide_by_linear(&f_alpha_Y, beta);
-    let mut q2_coeffs = vec![E::Scalar::ZERO; n_padded];
-    for (j, &coef) in q2.iter().enumerate() {
-      q2_coeffs[j * num_cols] = coef;
-    }
-
+    let q2_coeffs = divide_by_linear(&f_alpha_Y, beta);
     let (pi1, pi2) = rayon::join(
       || {
         E::CE::commit(ck, &q1_coeffs, &E::Scalar::ZERO)
@@ -801,12 +796,14 @@ where
           .affine()
       },
       || {
-        E::CE::commit(ck, &q2_coeffs, &E::Scalar::ZERO)
-          .comm
-          .affine()
+        // q2 is size sqrt(N), extract only (tau^0 sigma^j)
+        // adapted from commit
+        let bases: Vec<_> = (0..q2_coeffs.len())
+          .map(|j| ck.ck()[j * num_cols])
+          .collect();
+        E::GE::vartime_multiscalar_mul(&q2_coeffs, &bases).affine()
       },
     );
-
     Ok(EvaluationArgument { pi1, pi2 })
   }
 

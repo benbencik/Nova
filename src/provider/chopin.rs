@@ -250,19 +250,18 @@ fn divide_by_binomial<Scalar: PrimeField>(
   num_cols: usize,
   alpha: &Scalar,
 ) -> (UniPoly<Scalar>, UniPoly<Scalar>) {
+  assert_eq!(coeffs.len(), num_rows * num_cols);
+
   let (quotients, remainder): (Vec<Vec<Scalar>>, Vec<Scalar>) = (0..num_cols)
     .into_par_iter()
     .map(|col_id| {
       let mut quotient = UniPoly {
         coeffs: coeffs
-          .iter()
-          .skip(col_id)
-          .step_by(num_cols)
-          .copied()
+          .chunks_exact(num_cols)
+          .take(num_rows)
+          .map(|row| row[col_id])
           .collect(),
       };
-
-      assert_eq!(quotient.coeffs.len(), num_rows);
 
       let remainder = quotient.divide_by_linear_polynomial_chopin(alpha);
 
@@ -300,12 +299,17 @@ fn compute_h_poly<Scalar: PrimeField>(
   num_rows: usize,
   num_cols: usize,
 ) -> UniPoly<Scalar> {
+  assert_eq!(f_poly.len(), num_rows * num_cols);
+  assert_eq!(eq_col.len(), num_cols);
+
   let coeffs = (0..num_rows)
     .into_par_iter()
     .map(|row_id| {
-      (0..num_cols)
-        .into_par_iter()
-        .map(|col_id| f_poly[row_id * num_cols + col_id] * eq_col[col_id])
+      let row = &f_poly[row_id * num_cols..(row_id + 1) * num_cols];
+      row
+        .iter()
+        .zip(eq_col.iter())
+        .map(|(f, e)| *f * *e)
         .sum::<Scalar>()
     })
     .collect();
@@ -780,33 +784,24 @@ where
     transcript.absorb(LABEL_U, &point.to_vec().as_slice());
     transcript.absorb(LABEL_E, &[*eval].to_vec().as_slice());
 
-    let (f_poly, log_b, b, point) = {
-      let mut log_n = point.len();
+    let log_n = point.len();
+    assert!(log_n > 1);
+    let log_row = log_n / 2;
+    let log_col = log_n - log_row;
+    let num_rows = 1 << log_row;
+    let num_cols = 1 << log_col;
 
-      assert!(log_n > 1);
-
-      let mut point = point.to_vec();
-      let mut f_poly = poly.to_vec();
-
-      if log_n % 2 == 1 {
-        log_n += 1;
-        point.insert(0, E::Scalar::ZERO);
-        f_poly.resize(1 << log_n, E::Scalar::ZERO);
-      }
-      let log_b = log_n / 2;
-      let b = 1 << log_b;
-
-      (f_poly, log_b, b, point)
-    };
+    let f_poly = poly.to_vec();
+    let point = point.to_vec();
 
     let uni_ck = bivariatekzg::CommitmentKey::<E>::new(
-      ck.uni_commit_key(b).to_vec(),
+      ck.uni_commit_key(num_cols).to_vec(),
       *ck.h(),
       *ck.tau_H(),
       *ck.sigma_H(),
     );
 
-    let (u_row, u_col) = point.split_at(log_b);
+    let (u_row, u_col) = point.split_at(log_row);
     let u_row = u_row.to_owned();
     let u_col = u_col.to_owned();
 
@@ -839,12 +834,12 @@ where
 
     // * 1. Mercury Section 6. Step 1. (a)
     // Compute h(X)
-    let h_poly = compute_h_poly(&f_poly, &eq_col, b, b);
+    let h_poly = compute_h_poly(&f_poly, &eq_col, num_rows, num_cols);
 
     #[cfg(debug_assertions)]
     {
       // Check h, eq_evals_row ipa vs eval
-      assert_eq!(eq_row.len(), b);
+      assert_eq!(eq_row.len(), num_rows);
 
       let inner_product = eq_row
         .iter()
@@ -864,23 +859,23 @@ where
 
     // * 4. Mercury Section 6. Step 2. (b)
     // Compute q(X) and g(X)
-    let (mut q_poly, g_poly) = divide_by_binomial(&f_poly, b, b, &alpha);
+    let (mut q_poly, g_poly) = divide_by_binomial(&f_poly, num_rows, num_cols, &alpha);
 
     q_poly.trim_chopin();
 
-    assert_eq!(g_poly.coeffs.len(), b);
+    assert_eq!(g_poly.coeffs.len(), num_cols);
 
     #[cfg(debug_assertions)]
     {
       // Check g
-      let f_alphas = (0..b)
+      let f_alphas = (0..num_cols)
         .into_par_iter()
         .map(|col_id| {
           use crate::spartan::polys::univariate::UniPoly;
 
-          let coeffs = (0..b)
+          let coeffs = (0..num_rows)
             .into_par_iter()
-            .map(|row_id| f_poly[row_id * b + col_id])
+            .map(|row_id| f_poly[row_id * num_cols + col_id])
             .collect::<Vec<_>>();
 
           UniPoly { coeffs }.evaluate(&alpha)
@@ -910,7 +905,7 @@ where
       let q_r = q_poly.evaluate(&r);
       let g_r = g_poly.evaluate(&r);
 
-      assert_eq!(f_r, (r.pow([b as u64]) - alpha) * q_r + g_r);
+      assert_eq!(f_r, (r.pow([num_cols as u64]) - alpha) * q_r + g_r);
     }
 
     // * 5. Mercury Section 6. Step 2. (c)
@@ -938,10 +933,16 @@ where
 
     // * 7. Mercury Section 6. Step 3. (b)
     // Compute s(X)
+    let mut eq_row_padded = eq_row.clone();
+    eq_row_padded.resize(num_cols, E::Scalar::ZERO);
+
+    let mut h_poly_padded = h_poly.clone();
+    h_poly_padded.coeffs.resize(num_cols, E::Scalar::ZERO);
+
     let s_poly = make_s_polynomial(
-      (&eq_col, &eq_row),
-      (&g_poly.coeffs, &h_poly.coeffs),
-      log_b as u32,
+      (&eq_col, &eq_row_padded),
+      (&g_poly.coeffs, &h_poly_padded.coeffs),
+      log_col as u32,
       &gamma,
     );
 
@@ -1136,23 +1137,10 @@ where
       (alpha, gamma, zeta)
     };
 
-    let point = {
-      let log_n = point.len();
-      let mut point = point.to_vec();
-
-      if log_n % 2 == 1 {
-        point.insert(0, E::Scalar::ZERO);
-      }
-
-      point
-    };
-
     let log_n = point.len();
-
-    let u_row = point.split_at(log_n / 2).0.to_vec();
-    let log_row = u_row.len();
-
-    let u_col = point.split_at(log_n - log_row).1.to_vec();
+    let log_row = log_n / 2;
+    let u_row = point.split_at(log_row).0.to_vec();
+    let u_col = point.split_at(log_row).1.to_vec();
 
     let zeta_inv = zeta.invert().unwrap();
 
@@ -1289,9 +1277,9 @@ mod tests {
     let point = (0..log_n).map(|_| F::random(OsRng)).collect::<Vec<_>>();
 
     // TODO: implementation of KZG requires perfect square (consider if this is necessary)
-    let setup_n = if log_n % 2 == 1 { 1 << (log_n + 1) } else { n };
+    // let setup_n = if log_n % 2 == 1 { 1 << (log_n + 1) } else { n };
     let ck = <<E as Engine>::CE as CommitmentEngineTrait<E>>::CommitmentKey::setup_from_rng(
-      b"test", setup_n, OsRng,
+      b"test", n, OsRng,
     );
 
     let (pk, vk) = EE::setup(&ck).unwrap();
@@ -1342,7 +1330,7 @@ mod tests {
 
   #[test]
   fn test_chopin_evaluation_engine() {
-    for log_n in 6..=16 {
+    for log_n in 5..15 {
       prove_and_verify(log_n);
     }
   }
