@@ -5,7 +5,7 @@
 //!
 //! Chopin reuses the bivariate KZG commitment key and engine types.
 
-use std::{cmp::max, marker::PhantomData, sync::Mutex, time::Instant};
+use std::{cmp::max, marker::PhantomData, sync::Mutex};
 
 use ff::{Field, PrimeField};
 use halo2curves::fft::best_fft;
@@ -36,25 +36,19 @@ use crate::{
 #[derive(Debug, Clone, Copy)]
 /// measurements for benchmarks
 pub struct ChopinTiming {
-  /// time spent in pairing operations (milliseconds)
-  pub pairing_operations_ms: f64,
-  /// time spent committing q (milliseconds)
-  pub commit_pi_ms: f64,
-  /// time spent committing g (milliseconds)
-  pub commit_g_ms: f64,
-  /// time spent committing h (milliseconds)
-  pub commit_h_ms: f64,
-  /// time spent committing batch proof (π') (milliseconds)
-  pub commit_batch_proof_ms: f64,
+  /// time spent committing to pi1, pi2 computed in rayon join
+  pub commit_pi_parallel_ms: f64,
+  /// time spent committing pi1 (milliseconds)
+  pub commit_pi1_ms: f64,
+  /// time spent committing pi2 (milliseconds)
+  pub commit_pi2_ms: f64,
 }
 
 /// global timing measurements
 static CHOPIN_TIMINGS: Mutex<ChopinTiming> = Mutex::new(ChopinTiming {
-  pairing_operations_ms: 0.0,
-  commit_pi_ms: 0.0,
-  commit_g_ms: 0.0,
-  commit_h_ms: 0.0,
-  commit_batch_proof_ms: 0.0,
+  commit_pi_parallel_ms: 0.0,
+  commit_pi1_ms: 0.0,
+  commit_pi2_ms: 0.0,
 });
 
 impl ChopinTiming {
@@ -66,37 +60,25 @@ impl ChopinTiming {
   /// reset all timing measurements to 0
   pub fn reset() {
     *CHOPIN_TIMINGS.lock().unwrap() = ChopinTiming {
-      pairing_operations_ms: 0.0,
-      commit_pi_ms: 0.0,
-      commit_g_ms: 0.0,
-      commit_h_ms: 0.0,
-      commit_batch_proof_ms: 0.0,
+      commit_pi_parallel_ms: 0.0,
+      commit_pi1_ms: 0.0,
+      commit_pi2_ms: 0.0,
     };
   }
 
   /// set timing
-  pub fn set_pairing_operations(ms: f64) {
-    CHOPIN_TIMINGS.lock().unwrap().pairing_operations_ms = ms;
+  pub fn set_commit_pi_parallel(ms: f64) {
+    CHOPIN_TIMINGS.lock().unwrap().commit_pi_parallel_ms = ms;
   }
 
   /// set timing
-  pub fn set_commit_pi(ms: f64) {
-    CHOPIN_TIMINGS.lock().unwrap().commit_pi_ms = ms;
+  pub fn set_commit_pi1(ms: f64) {
+    CHOPIN_TIMINGS.lock().unwrap().commit_pi1_ms = ms;
   }
 
   /// set timing
-  pub fn set_commit_g(ms: f64) {
-    CHOPIN_TIMINGS.lock().unwrap().commit_g_ms = ms;
-  }
-
-  /// set timing
-  pub fn set_commit_h(ms: f64) {
-    CHOPIN_TIMINGS.lock().unwrap().commit_h_ms = ms;
-  }
-
-  /// set timing
-  pub fn set_commit_batch_proof(ms: f64) {
-    CHOPIN_TIMINGS.lock().unwrap().commit_batch_proof_ms = ms;
+  pub fn set_commit_pi2(ms: f64) {
+    CHOPIN_TIMINGS.lock().unwrap().commit_pi2_ms = ms;
   }
 }
 
@@ -478,9 +460,8 @@ mod batch_evaluation {
   use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator,
   };
-  use std::time::Instant;
 
-  use crate::provider::chopin::{ChopinTiming, Commitment};
+  use crate::provider::chopin::{Commitment};
   use crate::provider::traits::DlogGroup;
   use crate::provider::traits::DlogGroupExt;
   use crate::{
@@ -712,9 +693,7 @@ mod batch_evaluation {
     };
 
     // W'(X) = quot_l(X)
-    let commit_batch_start = Instant::now();
     let comm_w_prime = E::CE::commit(ck, &quot_l_poly.coeffs, &E::Scalar::ZERO);
-    ChopinTiming::set_commit_batch_proof(commit_batch_start.elapsed().as_secs_f64() * 1000.0);
 
     Ok(BatchArg {
       comm_w,
@@ -920,9 +899,7 @@ where
     }
 
     // * 2. Mercury Section 6. Step 1. (b)
-    let commit_h_start = Instant::now();
     let comm_h = E::CE::commit(&uni_ck, &h_poly.coeffs, &E::Scalar::ZERO);
-    ChopinTiming::set_commit_h(commit_h_start.elapsed().as_secs_f64() * 1000.0);
     transcript.absorb(LABEL_H, &[comm_h].to_vec().as_slice());
 
     // * 3. Mercury Section 6. Step 2. (a)
@@ -981,9 +958,7 @@ where
 
     // * 5. Mercury Section 6. Step 2. (c)
     // * Main Cost (Prover) I: MSM of O(N^{1/2})
-    let commit_g_start = Instant::now();
     let comm_g = E::CE::commit(&uni_ck, &g_poly.coeffs, &E::Scalar::ZERO);
-    ChopinTiming::set_commit_g(commit_g_start.elapsed().as_secs_f64() * 1000.0);
 
     transcript.absorb(LABEL_G, &[comm_g].to_vec().as_slice());
 
@@ -1261,8 +1236,6 @@ where
     let lr = g2;
     let rr = tau2;
 
-    let pairing_start = Instant::now();
-
     // Bivariate opening check for f(alpha, zeta) = g_zeta.
     // This delegates to bivariatekzg's native verifier equation.
     // Swap evaluation points to match the prover: evaluate at (zeta, alpha) instead of (alpha, zeta)
@@ -1312,7 +1285,6 @@ where
 
     let pairing_l = E::GE::pairing(&ll.into_inner(), &lr);
     let pairing_r = E::GE::pairing(&rl.into_inner(), &rr);
-    ChopinTiming::set_pairing_operations(pairing_start.elapsed().as_secs_f64() * 1000.0);
 
     if pairing_l != pairing_r {
       return Err(NovaError::ProofVerifyError {

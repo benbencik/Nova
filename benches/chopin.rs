@@ -19,13 +19,13 @@ type E = Bn256EngineBivariateKZG;
 type F = halo2curves::bn256::Fr;
 type EE = nova_snark::provider::chopin::EvaluationEngine<E>;
 
-const NUM_ITERATIONS: usize = 3;
+const NUM_ITERATIONS: usize = 10;
 const KZG_KEY_DIR: &str = "bivariatekzg-setup";
 
 fn main() {
   init_chopin_timings_csv();
 
-  for log_n in 15..20 {
+  for log_n in 20..=25 {
     let n = 1 << log_n;
 
     let setup_start = Instant::now();
@@ -44,11 +44,9 @@ fn main() {
 
     let mut prover_total_times = Vec::new();
     let mut verifier_total_times = Vec::new();
-    let mut pi_times = Vec::new();
-    let mut g_times = Vec::new();
-    let mut h_times = Vec::new();
-    let mut batch_times = Vec::new();
-    let mut pairing_times = Vec::new();
+    let mut pi1_times = Vec::new();
+    let mut pi2_times = Vec::new();
+    let mut pi_parallel_times = Vec::new();
 
     for _ in 0..NUM_ITERATIONS {
       ChopinTiming::reset();
@@ -90,21 +88,16 @@ fn main() {
 
       prover_total_times.push(prover_time.as_secs_f64() * 1000.0);
       verifier_total_times.push(verifier_time.as_secs_f64() * 1000.0);
-      pairing_times.push(timings.pairing_operations_ms);
-      pi_times.push(timings.commit_pi_ms);
-      g_times.push(timings.commit_g_ms);
-      h_times.push(timings.commit_h_ms);
-      batch_times.push(timings.commit_batch_proof_ms);
+      pi1_times.push(timings.commit_pi1_ms);
+      pi2_times.push(timings.commit_pi2_ms);
+      pi_parallel_times.push(timings.commit_pi_parallel_ms);
     }
 
     let prover_avg = prover_total_times.iter().sum::<f64>() / prover_total_times.len() as f64;
     let verifier_avg = verifier_total_times.iter().sum::<f64>() / verifier_total_times.len() as f64;
-    let pairing_avg = pairing_times.iter().sum::<f64>() / pairing_times.len() as f64;
-
-    let pi_avg = pi_times.iter().sum::<f64>() / pi_times.len() as f64;
-    let g_avg = g_times.iter().sum::<f64>() / g_times.len() as f64;
-    let h_avg = h_times.iter().sum::<f64>() / h_times.len() as f64;
-    let batch_avg = batch_times.iter().sum::<f64>() / batch_times.len() as f64;
+    let pi1_avg = pi1_times.iter().sum::<f64>() / pi1_times.len() as f64;
+    let pi2_avg = pi2_times.iter().sum::<f64>() / pi2_times.len() as f64;
+    let pi_parallel_avg = pi_parallel_times.iter().sum::<f64>() / pi_parallel_times.len() as f64;
 
     save_chopin_timing_row((
       log_n,
@@ -112,11 +105,9 @@ fn main() {
       setup_ms,
       prover_avg,
       verifier_avg,
-      pairing_avg,
-      pi_avg,
-      g_avg,
-      h_avg,
-      batch_avg
+      pi1_avg,
+      pi2_avg,
+      pi_parallel_avg
     ));
   }
 
@@ -127,32 +118,30 @@ fn init_chopin_timings_csv() {
 
   writeln!(
     file,
-    "log_n,n,setup_ms,prover_ms,verifier_ms,pairing_operations_ms,commit_pi_ms,commit_g_ms,commit_h_ms,commit_batch_proof_ms"
+    "log_n,n,setup_ms,prover_ms,verifier_ms,commit_pi1_ms,commit_pi2_ms,commit_pi_parallel_ms"
   )
   .expect("Failed to write CSV header");
 }
 
-fn save_chopin_timing_row(row: (usize, usize, f64, f64, f64, f64, f64, f64, f64, f64)) {
+fn save_chopin_timing_row(row: (usize, usize, f64, f64, f64, f64, f64, f64)) {
   let mut file = std::fs::OpenOptions::new()
     .append(true)
     .open("chopin_bench.csv")
     .expect("Failed to open benchmark CSV file");
 
-  let (log_n, n, setup, prover, verifier, pairing, pi, g, h, batch) = row;
+  let (log_n, n, setup, prover, verifier, pi1, pi2, pi_parallel) = row;
 
   writeln!(
     file,
-    "{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}",
+    "{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}",
     log_n,
     n,
     setup,
     prover,
     verifier,
-    pairing,
-    pi,
-    g,
-    h,
-    batch,
+    pi1,
+    pi2,
+    pi_parallel,
   )
   .expect("Failed to write benchmark row");
 }

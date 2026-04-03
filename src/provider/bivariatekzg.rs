@@ -792,22 +792,28 @@ where
 
     let q2_coeffs = divide_by_linear(&f_alpha_Y, beta);
     let commit_pi_start = Instant::now();
-    let (pi1, pi2) = rayon::join(
+    let ((pi1, pi1_ms), (pi2, pi2_ms)) = rayon::join(
       || {
-        E::CE::commit(ck, &q1_coeffs, &E::Scalar::ZERO)
+        let commit_pi1_start = Instant::now();
+        let pi1 = E::CE::commit(ck, &q1_coeffs, &E::Scalar::ZERO)
           .comm
-          .affine()
+          .affine();
+        (pi1, commit_pi1_start.elapsed().as_secs_f64() * 1000.0)
       },
       || {
         // q2 is size sqrt(N), extract only (tau^0 sigma^j)
         // adapted from commit
+        let commit_pi2_start = Instant::now();
         let bases: Vec<_> = (0..q2_coeffs.len())
           .map(|j| ck.ck()[j * num_cols])
           .collect();
-        E::GE::vartime_multiscalar_mul(&q2_coeffs, &bases).affine()
+        let pi2 = E::GE::vartime_multiscalar_mul(&q2_coeffs, &bases).affine();
+      (pi2, commit_pi2_start.elapsed().as_secs_f64() * 1000.0)
       },
     );
-    ChopinTiming::set_commit_pi(commit_pi_start.elapsed().as_secs_f64() * 1000.0);
+    ChopinTiming::set_commit_pi_parallel(commit_pi_start.elapsed().as_secs_f64() * 1000.0);
+    ChopinTiming::set_commit_pi1(pi1_ms);
+    ChopinTiming::set_commit_pi2(pi2_ms);
     Ok(EvaluationArgument { pi1, pi2 })
   }
 
